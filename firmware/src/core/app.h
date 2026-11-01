@@ -51,7 +51,7 @@ class Platform {
 class App {
  public:
   /** The firmware version: the one place it is written (the app's bundling script reads it here). */
-  static constexpr const char* kFirmware = "0.2.4";
+  static constexpr const char* kFirmware = "0.2.5";
 
   static constexpr uint32_t kBootMs = 1800;
   static constexpr uint32_t kPairedMs = 2600;

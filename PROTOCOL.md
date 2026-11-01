@@ -229,7 +229,9 @@ reports the update as rolled back.
 {"t":"map","op":"begin","id":8,"size":81234,"w":1024,"h":1024,"lat":51.2142,"lon":6.7828,"mpp":1.2}
 ```
 
-A baseline JPEG, north up, whose centre pixel is at `lat`/`lon`, `mpp` metres per pixel. The display
+A baseline JPEG, north up, whose centre pixel is at `lat`/`lon`, `mpp` metres per pixel. From 0.2.5 an
+optional `"attr":"© OpenStreetMap"` (at most 39 bytes) names whom the picture is credited to; the
+display writes it under the map, "© Apple Maps" when it is left out. The display
 decodes it into its second map buffer and switches over once decoded, answering
 `{"t":"map","st":"ready","id":8}`. At most 1024 × 1024 pixels and 1 MiB; an image the display cannot
 take or decode is answered with `{"t":"map","st":"error","id":8,"err":"…"}`. Positions convert with the same flat projection on both sides,
