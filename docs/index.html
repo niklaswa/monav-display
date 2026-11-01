@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Monav Display Installer</title>
+  <meta name="description" content="Flash the Monav Display firmware onto a Waveshare ESP32-S3-Touch-AMOLED-1.75 from the browser.">
+  <script type="module" src="https://unpkg.com/esp-web-tools@10.4.0/dist/web/install-button.js?module"></script>
+  <style>
+    :root {
+      --bg: #0b0b0d; --card: #151517; --edge: #242428; --text: #f2f2f4; --text2: #98989f;
+      --green: #33d173; --blue: #0a84ff; --amber: #ffd60a;
+      color-scheme: dark;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0; background: var(--bg); color: var(--text);
+      font: 16px/1.55 -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", Roboto, sans-serif;
+    }
+    main { max-width: 760px; margin: 0 auto; padding: 48px 16px 64px; }
+    .hero { width: 100%; height: auto; display: block; margin: 0 0 32px; }
+    h1 { font-size: 2.2rem; line-height: 1.15; margin: 0 0 8px; letter-spacing: -0.02em; }
+    .lead { color: var(--text2); margin: 0 0 32px; font-size: 1.1rem; }
+    .card { background: var(--card); border: 1px solid var(--edge); border-radius: 20px; padding: 24px; margin: 0 0 20px; }
+    .card h2 { font-size: 1.05rem; margin: 0 0 12px; }
+    ol, ul { margin: 0; padding-left: 1.3em; }
+    li { margin: 4px 0; }
+    code { background: #1c1c1e; border-radius: 6px; padding: 1px 6px; font-size: 0.92em; }
+    a { color: var(--blue); }
+    .install { display: flex; flex-wrap: wrap; align-items: center; gap: 16px; }
+    .version { color: var(--text2); font-size: 0.95rem; }
+    esp-web-install-button button[slot="activate"] {
+      font: 600 1.05rem/1 inherit; color: #000; background: var(--green); border: 0;
+      border-radius: 999px; padding: 14px 26px; cursor: pointer;
+    }
+    esp-web-install-button button[slot="activate"]:hover { filter: brightness(1.08); }
+    .warn { color: var(--amber); }
+    footer { color: var(--text2); font-size: 0.9rem; margin-top: 32px; }
+  </style>
+</head>
+<body>
+  <main>
+    <img class="hero" src="images/hero.png" alt="Five screens of the Monav Display: speed with a traffic-light card, a turn, the map, a speed camera warning, charging stations on the map">
+    <h1>Monav Display Installer</h1>
+    <p class="lead">Puts the firmware on a Waveshare ESP32-S3-Touch-AMOLED-1.75 over USB, straight from this page.
+      After that, updates come over Bluetooth from the Monav app.</p>
+
+    <div class="card">
+      <h2>Install</h2>
+      <div class="install">
+        <esp-web-install-button manifest="firmware/manifest.json">
+          <button slot="activate">Connect and install</button>
+          <span slot="unsupported" class="warn">This browser can't talk to USB devices. Use Chrome or Edge on a computer.</span>
+          <span slot="not-allowed" class="warn">The page has to be opened over https.</span>
+        </esp-web-install-button>
+        <span class="version" id="version"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>How it goes</h2>
+      <ol>
+        <li>Plug the display into the computer with a USB-C cable that carries data.</li>
+        <li>Click <b>Connect and install</b> and pick the board in the browser's list (it shows up as
+          <code>USB JTAG/serial debug unit</code> or similar).</li>
+        <li>For a first install, let it erase the device. Erasing also forgets a paired iPhone.</li>
+        <li>When it's done, the display restarts and shows <b>Bereit zum Koppeln</b> with a four-digit code.
+          Pair it in Monav under <i>Settings › Display in the car</i>.</li>
+      </ol>
+    </div>
+
+    <div class="card">
+      <h2>If the board doesn't show up</h2>
+      <ul>
+        <li>Hold <b>BOOT</b> while plugging the cable in (download mode), then try again. Press <b>RST</b> or replug afterwards.</li>
+        <li>Charge-only cables don't work. Try another one, or another port.</li>
+        <li>On Linux, your user needs access to serial ports (the <code>dialout</code> group).</li>
+      </ul>
+    </div>
+
+    <footer>
+      Source, case files and the Bluetooth protocol: <a href="https://github.com/niklaswa/monav-display">github.com/niklaswa/monav-display</a>.
+      MIT licensed. Flashing by <a href="https://esphome.github.io/esp-web-tools/">ESP Web Tools</a>.
+    </footer>
+  </main>
+  <script>
+    fetch("firmware/manifest.json").then(r => r.json()).then(m => {
+      document.getElementById("version").textContent = "Firmware " + m.version;
+    }).catch(() => {});
+  </script>
+</body>
+</html>
