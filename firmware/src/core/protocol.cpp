@@ -203,16 +203,16 @@ bool parse(const char* json, size_t len, Message& out) {
     out.hasTz = true;
     out.tzMin = obj["tz"].as<int>();
   }
+  // hello, cfg (0.2.6): the language of the display's own texts
+  if (const char* lang = obj["lang"]) {
+    out.hasLang = true;
+    out.lang = (strncmp(lang, "en", 2) == 0) ? Lang::En : Lang::De;
+  }
 
   if (eq(t, "hello")) {
     out.type = MsgType::Hello;
     out.proto = asInt(obj["proto"], 0);
     copyStr(out.token, sizeof(out.token), obj["token"]);
-    const char* lang = obj["lang"];
-    if (lang != nullptr) {
-      out.hasLang = true;
-      out.lang = (strncmp(lang, "en", 2) == 0) ? Lang::En : Lang::De;
-    }
   } else if (eq(t, "v")) {
     out.type = MsgType::Vehicle;
     out.kmh = asFloat(obj["kmh"]);

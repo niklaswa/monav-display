@@ -36,7 +36,7 @@ map with the route and live charging stations, on a 1.75″ glass that sits on t
   crashes or hangs before it has proven itself, the bootloader goes back to the previous one.
 - **Gestures**: tap to switch layouts (HUD → focus → map), swipe for brightness, hold 3 s to forget the
   paired phone.
-- **German and English**, picked by the phone's language.
+- **German and English**, following the app's language or picked in its display settings.
 
 <table>
   <tr>

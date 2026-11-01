@@ -183,6 +183,7 @@ class TestPlatform : public Platform {
   int disconnects = 0;
   int bright = -1;
   int rot = -1;
+  int lang = -1;
   int layout = -1;
   bool paired = false;
   bool authorized = false;
@@ -200,7 +201,7 @@ class TestPlatform : public Platform {
   int loadRotation() override { return rot; }
   void saveRotation(int d) override { rot = d; }
   int loadLang() override { return -1; }
-  void saveLang(int) override {}
+  void saveLang(int l) override { lang = l; }
   int loadLayout() override { return layout; }
   void saveLayout(int l) override { layout = l; }
   void authorizationChanged(bool a) override { authorized = a; }
@@ -322,6 +323,11 @@ void app() {
     CHECK(p.rot == 5);
     a.message(parsed("{\"t\":\"cfg\",\"bright\":40}"), now + App::kRotationSaveMs + 20);
     CHECK(a.rotation() == 5);
+    // The language can change without a new hello (the app's own setting).
+    a.message(parsed("{\"t\":\"cfg\",\"lang\":\"en\"}"), now);
+    Frame lf;
+    a.frame(lf, now);
+    CHECK(lf.lang == Lang::En && p.lang == static_cast<int>(Lang::En));
     a.bootButtonHeld(now);
     CHECK(p.token.empty());
   }

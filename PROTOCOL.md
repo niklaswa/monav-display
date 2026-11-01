@@ -129,6 +129,8 @@ From 0.2.3: `"rot":-25` turns the whole picture that many degrees clockwise on t
 integer, wrapped into 0–359), for a display that hangs at an angle. It applies from the next frame,
 touches are turned back with it, and the display stores the angle once it has stopped changing, so
 the boot and waiting screens stand straight too. Monav sends it with every step of its slider.
+From 0.2.6: `"lang":"en"` switches the display's own texts like `hello`'s `lang` does, without a new
+connection (the app's display language setting).
 
 ### `chg` — charging stations, when the list changes (firmware 0.2.4)
 

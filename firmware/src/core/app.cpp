@@ -84,11 +84,14 @@ void App::setAuthorized(bool on) {
   p_.authorizationChanged(on);
 }
 
+void App::setLang(Lang lang) {
+  if (lang == lang_) return;
+  lang_ = lang;
+  p_.saveLang(static_cast<int>(lang_));
+}
+
 void App::handleHello(const Message& m, uint64_t now) {
-  if (m.hasLang && m.lang != lang_) {
-    lang_ = m.lang;
-    p_.saveLang(static_cast<int>(lang_));
-  }
+  if (m.hasLang) setLang(m.lang);
   if (m.hasTz) {
     hasTz_ = true;
     tzMin_ = m.tzMin;
@@ -207,6 +210,7 @@ void App::message(const Message& m, uint64_t now) {
         tzMin_ = m.tzMin;
       }
       if (m.hasTilt) tilt_ = m.tilt;
+      if (m.hasLang) setLang(m.lang);
       if (m.rot >= 0 && m.rot != rot_) {
         rot_ = m.rot;
         rotChangedAt_ = now;

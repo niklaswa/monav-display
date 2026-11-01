@@ -51,7 +51,7 @@ class Platform {
 class App {
  public:
   /** The firmware version: the one place it is written (the app's bundling script reads it here). */
-  static constexpr const char* kFirmware = "0.2.5";
+  static constexpr const char* kFirmware = "0.2.6";
 
   static constexpr uint32_t kBootMs = 1800;
   static constexpr uint32_t kPairedMs = 2600;
@@ -101,6 +101,7 @@ class App {
   void applyBrightness(uint64_t now);
   void sendStatus();
   void setLayout(Layout layout);
+  void setLang(Lang lang);
   void setAuthorized(bool on);
   void resetPairing(uint64_t now);
   float runDown(float d) const;
