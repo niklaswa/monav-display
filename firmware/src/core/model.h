@@ -173,6 +173,8 @@ struct Message {
   bool intro = false;
   bool hasLaunch = false;  // cfg (0.2.7): time 0–100 km/h (the phone has the car's speed)
   bool launch = false;
+  bool hasTolerance = false;  // cfg (0.2.13): percent over the limit that still counts as fine
+  int tolerance = 0;
   bool hasNotices = false;  // cfg (0.2.11): the iPhone's notifications
   NoticeMode notices = NoticeMode::Off;
   bool hasNoticeText = false;  // cfg (0.2.11): the message text too, not just app and sender

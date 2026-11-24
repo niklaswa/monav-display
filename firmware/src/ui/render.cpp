@@ -216,11 +216,13 @@ void limitSign(Ctx& x, float cx, float cy, float r, int value) {
   text(x, font, buf, cx + 0.5f, cy + capHeight(font) / 2, col::black);
 }
 
-uint32_t speedStatus(float speed, int limit) {
+/** Green up to the limit (and the tolerance over it), amber up to 5 km/h beyond, red after that. */
+uint32_t speedStatus(float speed, int limit, int tol = 0) {
   if (limit <= 0) return col::white;
   const long sp = std::lround(speed);
-  if (sp > limit + 5) return col::red;
-  if (sp > limit) return col::amber;
+  const int allowed = allowedKmh(limit, tol);
+  if (sp > allowed + 5) return col::red;
+  if (sp > allowed) return col::amber;
   return col::green;
 }
 
@@ -232,7 +234,7 @@ void speedRing(Ctx& x, const Frame& f) {
   g_prof.ringUs += clockUs() - t0;
 }
 void speedRingImpl(Ctx& x, const Frame& f) {
-  const uint32_t status = speedStatus(f.speed, f.limit);
+  const uint32_t status = speedStatus(f.speed, f.limit, f.tolerance);
   gfx::ringArc(x.s, kC, kC, kRingR, kRingW, kA0, kA1, col::track, col::track);
 
   // Ticks every 10 (or 20) km/h, just inside the ring.
@@ -315,10 +317,11 @@ Str lightLabel(LightState st) {
   }
 }
 
-uint32_t sectionColor(const Section& sec) {
+uint32_t sectionColor(const Section& sec, int tol = 0) {
   if (sec.vmax <= 0) return col::white;
-  if (sec.avg > sec.vmax + 0.5f) return col::red;
-  if (sec.avg > sec.vmax - 2.0f) return col::amber;
+  const int allowed = allowedKmh(sec.vmax, tol);
+  if (sec.avg > allowed + 0.5f) return col::red;
+  if (sec.avg > allowed - 2.0f) return col::amber;
   return col::green;
 }
 
@@ -348,7 +351,7 @@ void cameraCard(Ctx& x, const Frame& f) {
 
 void sectionCard(Ctx& x, const Frame& f) {
   const Section& sec = f.scene.sec;
-  const uint32_t c = sectionColor(sec);
+  const uint32_t c = sectionColor(sec, f.tolerance);
   card(x);
   gfx::fillCircle(x.s, x.G.capL, x.G.cy, x.G.disc, col::disc);
   gfx::strokeCircle(x.s, x.G.capL, x.G.cy, x.G.disc - 1.5f, 3.0f, c);
@@ -530,7 +533,7 @@ void secondaryChip(Ctx& x, const Frame& f, Card which) {
     case Card::Section: {
       snprintf(label, sizeof(label), "Ø %d %s", static_cast<int>(std::lround(f.scene.sec.avg)),
                tr(f.lang, Str::Kmh));
-      chip(x, kChipCy, label, sectionColor(f.scene.sec), 0, nullptr);
+      chip(x, kChipCy, label, sectionColor(f.scene.sec, f.tolerance), 0, nullptr);
       break;
     }
     case Card::Light:
@@ -599,7 +602,7 @@ void edgeRing(Ctx& x, const Frame& f) {
 }
 void edgeRingImpl(Ctx& x, const Frame& f) {
   constexpr float r = 227.0f, w = 8.0f;
-  uint32_t status = speedStatus(f.speed, f.limit);
+  uint32_t status = speedStatus(f.speed, f.limit, f.tolerance);
   float alpha = 1.0f;
   if (f.alert > 0) {
     // Camera close and too fast: the ring turns red and pulses (in the same pass).
@@ -728,7 +731,7 @@ void driveScreen(Ctx& x) {
   const long sp = std::lround(f.speed < 0 ? 0 : f.speed);
   char num[8];
   snprintf(num, sizeof(num), "%ld", sp);
-  const uint32_t status = speedStatus(f.speed, f.limit);
+  const uint32_t status = speedStatus(f.speed, f.limit, f.tolerance);
   const uint32_t numColor = status == col::green ? col::white : status;
 
   // The map layout needs a picture under the car; until there is one, the HUD and a chip say so.
@@ -1334,7 +1337,7 @@ void chronoDrive(Ctx& x) {
   }
   char num[8];
   snprintf(num, sizeof(num), "%ld", std::lround(f.speed < 0 ? 0 : f.speed));
-  const uint32_t status = speedStatus(f.speed, f.limit);
+  const uint32_t status = speedStatus(f.speed, f.limit, f.tolerance);
   text(x, Font::Num, num, kC, chrono::kLowY + 10, status == col::green ? chrono::lume : status);
   text(x, Font::Tiny, tr(f.lang, Str::Kmh), kC, chrono::kLowY + 32, chrono::track);
   if (!f.linkLost && f.primary != Card::None) secondaryChip(x, f, f.primary);
@@ -1428,7 +1431,7 @@ void stopwatchDrive(Ctx& x) {
   if (f.limit > 0) limitSign(x, kC, 172, 32, f.limit);
   char num[8];
   snprintf(num, sizeof(num), "%ld", std::lround(f.speed < 0 ? 0 : f.speed));
-  const uint32_t status = speedStatus(f.speed, f.limit);
+  const uint32_t status = speedStatus(f.speed, f.limit, f.tolerance);
   const int w = width(x, Font::Num, num);
   gfx::fillRoundRect(x.s, kC - w / 2.0f - 14, 262, w + 28, 62, 16, stopwatch::centre, 0.92f);
   text(x, Font::Num, num, kC, 302, status == col::green ? col::white : status);

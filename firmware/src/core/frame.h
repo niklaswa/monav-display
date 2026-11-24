@@ -27,6 +27,15 @@ enum class Egg : uint8_t {
   Answer,    // 42 km/h held for a few seconds
 };
 
+/**
+ * The speed allowed over a limit before the speed counts as too fast: `tol` percent of it (`cfg.tol`,
+ * 0.2.13), rounded to whole km/h. 0 keeps the plain limit.
+ */
+inline int allowedKmh(int limit, int tol) {
+  if (limit <= 0 || tol <= 0) return limit;
+  return limit + (limit * tol + 50) / 100;
+}
+
 /** Where the call's two buttons sit on the full notification (renderer and touch agree on it). */
 constexpr float kCallButtonDx = 84;  // left (decline) and right (accept) of the centre
 constexpr float kCallButtonY = 368;
@@ -78,6 +87,7 @@ struct Frame {
   float scaleMax = 100;   // km/h at the end of the ring (eased when the limit changes)
   bool linkLost = false;  // no `v` for > 3 s or disconnected mid-drive
   float alert = 0;        // 0..1: camera close and too fast — the ring pulses red
+  int tolerance = 0;      // percent over a limit that still counts as fine (`cfg.tol`, 0.2.13)
 
   Card primary = Card::None;
   Card secondary = Card::None;

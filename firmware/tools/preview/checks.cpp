@@ -977,6 +977,24 @@ void notices() {
 
 }  // namespace
 
+void tolerance() {
+  // cfg.tol (0.2.13): percent over the limit that still counts as fine.
+  Message m;
+  const char* c = "{\"t\":\"cfg\",\"tol\":10}";
+  CHECK(proto::parse(c, strlen(c), m));
+  CHECK(m.type == MsgType::Config && m.hasTolerance && m.tolerance == 10);
+  const char* big = "{\"t\":\"cfg\",\"tol\":400}";
+  CHECK(proto::parse(big, strlen(big), m) && m.tolerance == 50);
+  const char* none = "{\"t\":\"cfg\",\"eggs\":true}";
+  CHECK(proto::parse(none, strlen(none), m) && !m.hasTolerance);
+
+  CHECK(allowedKmh(50, 0) == 50);
+  CHECK(allowedKmh(50, 10) == 55);
+  CHECK(allowedKmh(30, 10) == 33);
+  CHECK(allowedKmh(100, 15) == 115);
+  CHECK(allowedKmh(0, 10) == 0);
+}
+
 int runChecks() {
   framing();
   parsing();
@@ -989,6 +1007,7 @@ int runChecks() {
   app02();
   launch();
   notices();
+  tolerance();
   printf("Checks: %d passed, %d failed\n", g_passed, g_failed);
   return g_failed;
 }

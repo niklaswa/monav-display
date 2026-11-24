@@ -289,6 +289,10 @@ void App::message(const Message& m, uint64_t now) {
         }
         updateNoticeLink();
       }
+      if (m.hasTolerance && m.tolerance != tolerance_) {
+        tolerance_ = m.tolerance;
+        logf("app: tolerance %d %%", tolerance_);
+      }
       if (m.hasLaunch && m.launch != launchOn_) {
         launchOn_ = m.launch;
         launch_.reset();
@@ -785,6 +789,7 @@ void App::frame(Frame& f, uint64_t now) const {
   f.chargers = chargers_;
   f.speed = shownKmh_;
   f.limit = lim_;
+  f.tolerance = tolerance_;
   f.scaleMax = scaleMax_;
   f.linkLost = linkLost(now);
 
@@ -824,7 +829,8 @@ void App::frame(Frame& f, uint64_t now) const {
 
     // Camera close and the car too fast for it: the ring pulses.
     const int vmax = sc.cam.vmax > 0 ? sc.cam.vmax : lim_;
-    if (sc.cam.present && f.camD <= kCameraAlertM && vmax > 0 && std::lround(shownKmh_) > vmax) {
+    if (sc.cam.present && f.camD <= kCameraAlertM && vmax > 0 &&
+        std::lround(shownKmh_) > allowedKmh(vmax, tolerance_)) {
       f.alert = 1.0f;
     }
   }

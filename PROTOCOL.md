@@ -162,6 +162,11 @@ From 0.2.7, the look (all optional, kept on the display):
   `status`. `clock` keeps a watch face on during the drive — the `stopwatch` theme's when that is the
   theme, the `chrono` one otherwise — with the speed and the limit in it and the next warning as a chip.
 
+- `tol` (0.2.13): percent over a limit that still counts as fine, 0–50 (0: none, the default). The
+  speed ring stays green up to the limit plus that much (rounded to whole km/h: 10 % of 50 is 55),
+  turns amber up to 5 km/h beyond and red after that; the camera pulse and the average speed check
+  use the same margin. Older firmware ignores it.
+
 From 0.2.11, the iPhone's notifications (see "The iPhone's notifications" below):
 
 ```json

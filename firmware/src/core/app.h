@@ -91,7 +91,7 @@ class Platform {
 class App {
  public:
   /** The firmware version: the one place it is written (the app's bundling script reads it here). */
-  static constexpr const char* kFirmware = "0.2.12";
+  static constexpr const char* kFirmware = "0.2.13";
 
   static constexpr uint32_t kBootMs = 1800;
   static constexpr uint32_t kPairedMs = 2600;
@@ -259,6 +259,7 @@ class App {
   // 0–100 km/h
   LaunchTimer launch_;
   bool launchOn_ = false;
+  int tolerance_ = 0;  // `cfg.tol`: percent over the limit that still counts as fine
   bool launchPhoneTime_ = false;  // the timer runs on the phone's clock (v carries `now`)
   uint32_t bestRunMs_ = 0;
   uint32_t runMs_ = 0;

@@ -21,7 +21,8 @@ map with the route and live charging stations, on a 1.75″ glass in your line o
 ## Features
 
 - **Speedometer ring** whose scale runs to twice the limit, so the limit mark always sits at
-  12 o'clock. It fills green, amber when you're up to 5 km/h over, red beyond that.
+  12 o'clock. It fills green, amber when you're up to 5 km/h over, red beyond that. A tolerance set
+  in the app (say 10 %) moves all of it up: 55 at a 50 limit still counts as green.
 - **Speed limit sign** (German Zeichen 274) and big tabular digits that ease towards the latest speed.
 - **Speed cameras** with their kind, the distance counting down and their limit. If you're too
   fast within 400 m, the rim of the glass pulses red.

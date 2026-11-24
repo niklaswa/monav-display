@@ -1,6 +1,7 @@
 #include "core/protocol.h"
 
 #include <ArduinoJson.h>
+#include <algorithm>
 
 #include <cmath>
 #include <cstdio>
@@ -303,6 +304,10 @@ bool parse(const char* json, size_t len, Message& out) {
     if (obj["launch"].is<bool>()) {
       out.hasLaunch = true;
       out.launch = obj["launch"].as<bool>();
+    }
+    if (obj["tol"].is<int>()) {
+      out.hasTolerance = true;
+      out.tolerance = std::max(0, std::min(50, obj["tol"].as<int>()));
     }
     if (const char* ntf = obj["ntf"]) {
       out.hasNotices = true;
