@@ -6,7 +6,7 @@ namespace monav {
 
 void Gestures::push(GestureType type, int value) {
   if (count_ == sizeof(queue_) / sizeof(queue_[0])) return;
-  queue_[(head_ + count_) % (sizeof(queue_) / sizeof(queue_[0]))] = Gesture{type, value};
+  queue_[(head_ + count_) % (sizeof(queue_) / sizeof(queue_[0]))] = Gesture{type, value, startX_, startY_};
   count_++;
 }
 

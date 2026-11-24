@@ -1,7 +1,7 @@
 #pragma once
 
 // The BLE side of PROTOCOL.md: a NimBLE peripheral with the Monav service (inbox, outbox,
-// info), one connection at a time, no bonding. Writes are reassembled and parsed on the NimBLE
+// info), one connection at a time; bonded only for the iPhone's notifications (device/ancs). Writes are reassembled and parsed on the NimBLE
 // host task and handed to the UI task through a queue, in order, with the connection events.
 
 #include <cstddef>

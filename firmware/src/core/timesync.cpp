@@ -78,6 +78,11 @@ ClockTime localClock(int64_t phoneMs, bool hasTz, int tzMin) {
   ClockTime t;
   t.hour = static_cast<int>(secOfDay / 3600);
   t.minute = static_cast<int>((secOfDay / 60) % 60);
+  t.second = static_cast<int>(secOfDay % 60);
+  const int64_t ms = phoneMs % 1000;
+  t.millis = static_cast<int>(ms < 0 ? ms + 1000 : ms);
+  const int64_t day = local >= 0 ? local / 86400 : (local - 86399) / 86400;
+  civilFromDays(day, t.year, t.month, t.day);
   return t;
 }
 

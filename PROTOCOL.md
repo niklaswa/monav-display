@@ -22,8 +22,11 @@ Advertising data carries the flags and the service UUID; the scan response carri
 `Monav Display 4F2A`. The four hex digits (`id`) are the last two bytes of the Bluetooth address:
 the display shows them while waiting, the app shows them in the list of displays found.
 
-No Bluetooth bonding: reflashing the display must never leave a stale bond on the phone that only
-Settings › Bluetooth › Forget can clear. Pairing is done in the protocol (`hello`, below).
+Pairing with Monav is done in the protocol (`hello`, below), not by Bluetooth bonding: reflashing
+the display must never leave a stale bond on the phone that only Settings › Bluetooth › Forget can
+clear. The one exception is opt-in: the iPhone's notifications (`cfg.ntf`, firmware 0.2.11) need an
+encrypted, bonded link, so only then does the display ask the iPhone to pair (see "The iPhone's
+notifications" below).
 
 ## Framing
 
@@ -132,6 +135,49 @@ the boot and waiting screens stand straight too. Monav sends it with every step 
 From 0.2.6: `"lang":"en"` switches the display's own texts like `hello`'s `lang` does, without a new
 connection (the app's display language setting).
 
+From 0.2.7, the look (all optional, kept on the display):
+
+```json
+{"t":"cfg","theme":"chrono","name":"Niklas","eggs":true,"layout":"clock"}
+```
+
+- `theme`: the screens without a drive — `classic`, `aurora`, `orbit`, `retro`, `photo` (the picture
+  sent with `img`; without one the display falls back to `classic`), `chrono`, `stopwatch`.
+- `name`: greeted by name when the phone connects (at most 23 bytes; empty: no name). Every `welcome`
+  that is not a fresh pairing and not a reconnect mid-drive shows a greeting for a few seconds in the
+  theme's look; driving off ends it.
+- `intro` (0.2.9): a jump to hyperspace before the greeting — stars stretch into streaks in a
+  lavender tunnel, a white flash, the greeting comes out of it. Driving off ends it with the greeting.
+  From 0.2.10 the display keeps it and plays it at power-up instead of the traffic light; the first
+  connection within 20 s of that gets the greeting without a second jump.
+- `eggs`: small surprises — seven quick taps on the glass while parked, 88 mph, 42 km/h held, a few
+  dates and times. On by default.
+- `launch` (0.2.8): time 0–100 km/h. The phone sends `true` only while the speed in `v` comes from the car
+  (GPS alone is too coarse). Every start from standing is timed on the phone's clock (`now` in `v`),
+  interpolated at 1 and 100 km/h; a run counts when the car stood still for a second and reached
+  100 km/h within 30 s without slowing by more than 4 km/h. While one runs the time ticks on the
+  glass, then the result stays a few seconds and the display sends `{"t":"run","ms":4312,"best":true}`
+  (`best`: faster than any before, kept on the display).
+- `layout`: picks the layout as a tap on the glass would, and the display reports it back with
+  `status`. `clock` keeps a watch face on during the drive — the `stopwatch` theme's when that is the
+  theme, the `chrono` one otherwise — with the speed and the limit in it and the next warning as a chip.
+
+From 0.2.11, the iPhone's notifications (see "The iPhone's notifications" below):
+
+```json
+{"t":"cfg","ntf":"all","ntfText":false,"ntfFull":false}
+```
+
+- `ntf`: `off`, `calls` (incoming and missed calls) or `all`. Anything but `off` makes the display
+  bond with the iPhone on this connection and subscribe to its notifications.
+- `ntfText`: the message text too; without it the display shows the app and the sender (and a
+  subtitle such as a group name) only.
+- `ntfFull`: large while driving too. Without it a notification shows large (like the iPhone's
+  StandBy) only when the car stands; while it moves, a small pill low on the glass keeps the speed
+  visible. A ringing call is always large.
+
+The display keeps all three.
+
 ### `chg` — charging stations, when the list changes (firmware 0.2.4)
 
 ```json
@@ -143,6 +189,18 @@ Stations a charger plug-in reports live, nearest first, at most 16 within a few 
 `[lat, lon, free]`, or `[lat, lon, free, total]` when the user wants the total too. The map layout
 draws each as a pin with a bolt and the number — green while one is free, grey when full. An empty
 list takes them off; `bye` drops them. Monav sends the list again after every connection.
+
+### `bat` — the car is charging (firmware 0.2.8)
+
+```json
+{"t":"bat","soc":64.5,"kw":142,"km":326}
+{"t":"bat","on":false}
+```
+
+Every few seconds while the car charges (`soc` percent, `kw` charging power, `km` range — each
+optional but `soc`): the display shows its charging screen, the ring filling up to `soc` with the
+percentage counting along. It ends with `"on":false`, after 15 s without `bat`, or when the car
+moves (it wins over a drive standing at 0 km/h).
 
 ### `bye` — the drive ends or Monav quits
 
@@ -161,8 +219,22 @@ The display shows its standby screen and dims.
 {"t":"status","layout":"map"}
 ```
 
-`layout` (0.2.0) is what a tap on the glass picked: `hud`, `focus` or `map`. In `welcome` and
-whenever it changes — the phone renders and sends map images only while it is `map`.
+```json
+{"t":"ntf","st":"pairing"}
+{"t":"icon?","app":"net.whatsapp.WhatsApp"}
+```
+
+`ntf` (0.2.11) is how the link to the iPhone's notifications stands: `pairing` (the iPhone shows its
+pairing request), `on`, `blocked` (the iPhone does not share its notifications with the display:
+the service is missing or subscribing is refused; the display tries again every few seconds),
+`denied` (pairing refused), `stale` (the iPhone holds keys the display no longer has — forget the
+display in Settings › Bluetooth), `off`. `icon?` (0.2.11) asks for an app's icon, once per app and
+connection; see `icon` below.
+
+`layout` (0.2.0) is what a tap on the glass picked: `hud`, `focus`, `map` or (0.2.7) `clock`. In
+`welcome` and whenever it changes — the phone renders and sends map images only while it is `map`.
+`img` (0.2.7, in `welcome`): a picture for the photo theme is stored. `run` (0.2.8): a timed
+0–100 km/h, see `cfg.launch`.
 
 ## Pairing reset on the display
 
@@ -244,6 +316,32 @@ the next image ahead of the car, before the car comes near the edge of the curre
 The display draws the map turned to the driving direction, the car low in the circle, the route on
 top, and in the `map` layout the speed, the limit and the card over a darkened picture.
 
+### Picture for the photo theme (`img`, firmware 0.2.7)
+
+```json
+{"t":"img","op":"begin","id":10,"size":64211,"w":466,"h":466}
+{"t":"img","op":"clear"}
+```
+
+A baseline JPEG of exactly 466 × 466 pixels, at most 256 KiB. The display decodes it (darkened where
+the clock and the texts go), keeps it in flash — it survives restarts and firmware updates — and
+answers `{"t":"img","st":"ready","id":10}`, or `"error"` with `err`. `clear` deletes it and is
+answered with `{"t":"img","st":"cleared","id":0}`.
+
+### App icon (`icon`, firmware 0.2.11)
+
+```json
+{"t":"icon","op":"begin","id":11,"size":9214,"w":192,"h":192,"app":"net.whatsapp.WhatsApp"}
+{"t":"icon","op":"missing","app":"com.example.internal"}
+```
+
+The answer to `icon?`: a baseline JPEG of exactly 192 × 192 pixels, at most 64 KiB, the square
+artwork without rounded corners (the display rounds them). The display keeps the last dozen in
+memory, answers `{"t":"icon","st":"ready","id":11}` (or `"error"` with `err`) and draws the icon
+from then on. `missing`: there is none; the display keeps its own symbol (a rounded square in a
+colour of the app's with its initial, a handset for calls). Monav looks icons up in the App Store by
+bundle identifier and keeps them; its own icon it brings along.
+
 ### Route (`route`)
 
 ```json
@@ -254,3 +352,26 @@ top, and in the `map` layout the speed, the limit and the card over a darkened p
 The bytes are pairs of int16 little endian — metres east, metres north of `lat`/`lon` — the
 route's line from a little behind the car to some kilometres ahead, thinned to about 10 m. Sent with
 each map image while navigating; `clear` when the guidance ends.
+
+## The iPhone's notifications (firmware 0.2.11)
+
+With `cfg.ntf` set and the connection welcomed, the display asks the iPhone to secure the link
+(an SMP Security Request: LE Secure Connections, Just Works, bonding). The first time, iOS shows
+its pairing request; after that the stored keys encrypt the link without asking. On the encrypted
+link the display — still the peripheral, as a GATT client — finds Apple's Notification Center
+Service (ANCS) in the iPhone's database and subscribes to its Data Source and Notification Source.
+Subscribing makes iOS ask once whether to share system notifications with the display.
+
+Every new notification arrives as its id; the display asks for the app's bundle id, the title,
+subtitle, message and the action labels, and once per app for its display name. What was there
+before it subscribed is ignored. The display shows it as described under `cfg.ntf`; a tap takes it
+away (it stays on the iPhone). A ringing call shows two buttons: the right one answers it, the left
+one declines it (ANCS positive and negative action). A call answered or ended on the iPhone
+disappears from the glass.
+
+The display keeps at most three bonds and drops the oldest; a pairing reset keeps them (the same
+iPhone usually pairs again). Reflashing with the web installer erases them: iOS then still holds
+keys for a display that has none and refuses to connect until the display is forgotten in
+Settings › Bluetooth. Monav sees that refusal (`peerRemovedPairingInformation`) and says so.
+
+ANCS: https://developer.apple.com/library/archive/documentation/CoreBluetooth/Reference/AppleNotificationCenterServiceSpecification/

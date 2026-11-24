@@ -3,6 +3,7 @@
 #include <Arduino.h>
 #include <esp_heap_caps.h>
 #include <esp_ota_ops.h>
+#include <esp_partition.h>
 #include <esp_task_wdt.h>
 #include <esp_timer.h>
 #include <freertos/FreeRTOS.h>
@@ -118,6 +119,61 @@ bool s_routeClear = false;
 int16_t* s_routeCur = nullptr;
 RouteLine s_routeLine;
 bool s_haveRoute = false;
+
+// --- Picture for the photo theme ------------------------------------------------------------------
+//
+// Kept in the flash's data partition (unused otherwise): a 16-byte header — magic, JPEG length —
+// and the JPEG after it. The header is written last, so a write cut short leaves no picture.
+
+constexpr size_t kWallJpgMax = 256 * 1024;
+constexpr uint32_t kWallMagic = 0x50574E4D;  // "MNWP"
+constexpr size_t kWallHeader = 16;
+constexpr size_t kSector = 4096;
+const esp_partition_t* s_wallPart = nullptr;
+uint16_t* s_wallBuf[2] = {nullptr, nullptr};
+int s_wallFront = 0;         // UI task (the worker reads it only while no swap is pending)
+Wallpaper s_wallImg;         // UI task
+bool s_haveWall = false;     // UI task
+std::atomic<bool> s_wallStored{false};
+std::atomic<bool> s_wallSwap{false};  // decoded into the back buffer: the UI takes it
+std::atomic<bool> s_wallDrop{false};  // cleared: the UI drops it
+std::atomic<bool> s_imgClear{false};  // the phone asked to clear it: the worker erases
+// Receiving (NimBLE task).
+bulk::Slot s_imgSlot;
+uint8_t* s_imgRx = nullptr;
+// Received, waiting for the worker (under s_lock).
+uint8_t* s_imgJob = nullptr;
+size_t s_imgJobLen = 0;
+uint8_t s_imgJobId = 0;
+
+// --- App icons for the iPhone's notifications (0.2.11) ---------------------------------------------
+//
+// Decoded into a small cache in PSRAM, least recently shown out first. The worker never overwrites
+// the slot the UI showed last; the UI looks icons up by bundle id under s_lock.
+
+constexpr int kIcons = 12;
+constexpr size_t kIconJpgMax = 64 * 1024;
+constexpr size_t kIconPx = static_cast<size_t>(AppIcon::kSize) * AppIcon::kSize;
+struct IconSlot {
+  char app[64];
+  uint16_t* px;
+  uint32_t used;
+  bool ready;
+};
+IconSlot s_icons[kIcons];   // under s_lock (px contents: worker, while not ready)
+int s_iconShown = -1;       // under s_lock
+uint32_t s_iconClock = 0;   // under s_lock
+uint16_t* s_iconTmp = nullptr;
+AppIcon s_iconView;         // UI task
+// Receiving (NimBLE task).
+bulk::Slot s_iconSlot;
+uint8_t* s_iconRx = nullptr;
+char s_iconRxApp[64] = {0};
+// Received, waiting for the worker (under s_lock).
+uint8_t* s_iconJob = nullptr;
+size_t s_iconJobLen = 0;
+uint8_t s_iconJobId = 0;
+char s_iconJobApp[64] = {0};
 
 // --- Firmware update ------------------------------------------------------------------------------
 
@@ -392,6 +448,146 @@ void mapPump() {
                 static_cast<unsigned>(job.len / 1024), static_cast<int>(us / 1000));
 }
 
+// --- Picture (worker) -------------------------------------------------------------------------------
+
+bool writeWallpaper(const uint8_t* jpg, size_t len) {
+  if (s_wallPart == nullptr || len + kWallHeader > s_wallPart->size) return false;
+  const size_t total = (len + kWallHeader + kSector - 1) / kSector * kSector;
+  for (size_t off = 0; off < total; off += kSector) {
+    if (esp_partition_erase_range(s_wallPart, off, kSector) != ESP_OK) return false;
+    feedWatchdog();
+  }
+  for (size_t off = 0; off < len; off += kSector) {
+    const size_t n = len - off < kSector ? len - off : kSector;
+    if (esp_partition_write(s_wallPart, kWallHeader + off, jpg + off, n) != ESP_OK) return false;
+    feedWatchdog();
+  }
+  const uint32_t header[4] = {kWallMagic, static_cast<uint32_t>(len), 0, 0};
+  return esp_partition_write(s_wallPart, 0, header, sizeof(header)) == ESP_OK;
+}
+
+void imgPump() {
+  if (s_wallSwap.load() || s_restartPending.load() || s_otaActive) return;
+  if (s_imgClear.exchange(false)) {
+    if (s_wallPart != nullptr) esp_partition_erase_range(s_wallPart, 0, kSector);
+    s_wallStored.store(false);
+    s_wallDrop.store(true);
+    queueState("img", "cleared", 0);
+    Serial.println("img: cleared");
+  }
+  uint8_t* jpg = nullptr;
+  size_t len = 0;
+  uint8_t id = 0;
+  portENTER_CRITICAL(&s_lock);
+  if (s_imgJob != nullptr) {
+    jpg = s_imgJob;
+    len = s_imgJobLen;
+    id = s_imgJobId;
+    s_imgJob = nullptr;
+  }
+  portEXIT_CRITICAL(&s_lock);
+  if (jpg == nullptr) return;
+  const int back = 1 - s_wallFront;
+  const int64_t t0 = esp_timer_get_time();
+  const bool ok = s_wallBuf[back] != nullptr && ui::decodeWallpaper(jpg, len, s_wallBuf[back], feedWatchdog);
+  if (!ok) {
+    heap_caps_free(jpg);
+    Serial.printf("img: #%u did not decode\n", id);
+    queueState("img", "error", id, "decode");
+    return;
+  }
+  const bool saved = writeWallpaper(jpg, len);
+  heap_caps_free(jpg);
+  if (saved) s_wallStored.store(true);
+  s_wallSwap.store(true);
+  Serial.printf("img: #%u decoded and %s (%u kB) in %d ms\n", id, saved ? "saved" : "NOT saved",
+                static_cast<unsigned>(len / 1024), static_cast<int>((esp_timer_get_time() - t0) / 1000));
+  queueState("img", saved ? "ready" : "error", id, saved ? nullptr : "flash");
+}
+
+/** At boot: the stored picture into the front buffer. */
+void loadWallpaper() {
+  s_wallPart = esp_partition_find_first(ESP_PARTITION_TYPE_DATA, ESP_PARTITION_SUBTYPE_DATA_SPIFFS, nullptr);
+  if (s_wallPart == nullptr || s_wallBuf[0] == nullptr) return;
+  uint32_t header[4] = {0};
+  if (esp_partition_read(s_wallPart, 0, header, sizeof(header)) != ESP_OK || header[0] != kWallMagic ||
+      header[1] == 0 || header[1] > kWallJpgMax) {
+    return;
+  }
+  uint8_t* jpg = static_cast<uint8_t*>(heap_caps_malloc(header[1], MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (jpg == nullptr) return;
+  const bool ok = esp_partition_read(s_wallPart, kWallHeader, jpg, header[1]) == ESP_OK &&
+                  ui::decodeWallpaper(jpg, header[1], s_wallBuf[0]);
+  heap_caps_free(jpg);
+  if (!ok) {
+    Serial.println("img: the stored picture did not decode");
+    return;
+  }
+  s_wallFront = 0;
+  s_wallImg.px = s_wallBuf[0];
+  s_haveWall = true;
+  s_wallStored.store(true);
+  Serial.printf("img: stored picture loaded (%u kB)\n", static_cast<unsigned>(header[1] / 1024));
+}
+
+// --- Icons (worker) ------------------------------------------------------------------------------
+
+void iconPump() {
+  uint8_t* jpg = nullptr;
+  size_t len = 0;
+  uint8_t id = 0;
+  char app[64];
+  portENTER_CRITICAL(&s_lock);
+  if (s_iconJob != nullptr) {
+    jpg = s_iconJob;
+    len = s_iconJobLen;
+    id = s_iconJobId;
+    memcpy(app, s_iconJobApp, sizeof(app));
+    s_iconJob = nullptr;
+  }
+  portEXIT_CRITICAL(&s_lock);
+  if (jpg == nullptr) return;
+  const bool ok = s_iconTmp != nullptr &&
+                  ui::decodeImage(jpg, len, s_iconTmp, AppIcon::kSize, AppIcon::kSize, feedWatchdog);
+  heap_caps_free(jpg);
+  if (!ok) {
+    Serial.printf("icon: #%u for %s did not decode\n", id, app);
+    queueState("icon", "error", id, "decode");
+    return;
+  }
+  // The same app's slot, a free one, or the one shown least recently - never the one on the glass.
+  int slot = -1;
+  portENTER_CRITICAL(&s_lock);
+  for (int i = 0; i < kIcons && slot < 0; i++) {
+    if (s_icons[i].px != nullptr && strcmp(s_icons[i].app, app) == 0 && i != s_iconShown) slot = i;
+  }
+  for (int i = 0; i < kIcons && slot < 0; i++) {
+    if (s_icons[i].px != nullptr && s_icons[i].app[0] == 0) slot = i;
+  }
+  if (slot < 0) {
+    for (int i = 0; i < kIcons; i++) {
+      if (s_icons[i].px == nullptr || i == s_iconShown) continue;
+      if (slot < 0 || s_icons[i].used < s_icons[slot].used) slot = i;
+    }
+  }
+  if (slot >= 0) {
+    s_icons[slot].ready = false;
+    memcpy(s_icons[slot].app, app, sizeof(s_icons[slot].app));
+  }
+  portEXIT_CRITICAL(&s_lock);
+  if (slot < 0) {
+    queueState("icon", "error", id, "no memory");
+    return;
+  }
+  memcpy(s_icons[slot].px, s_iconTmp, kIconPx * 2);
+  portENTER_CRITICAL(&s_lock);
+  s_icons[slot].ready = true;
+  s_icons[slot].used = ++s_iconClock;
+  portEXIT_CRITICAL(&s_lock);
+  Serial.printf("icon: %s (%u bytes)\n", app, static_cast<unsigned>(len));
+  queueState("icon", "ready", id);
+}
+
 void workerTask(void*) {
   // Watched: a worker stuck for 5 s (flash, decoding) resets the display - on probation that is a
   // rollback. The decode feeds the watchdog as it goes.
@@ -404,6 +600,8 @@ void workerTask(void*) {
     Out o;
     while (xQueueReceive(s_out, &o, 0) == pdTRUE) ble::send(o.json, o.len);
     mapPump();
+    imgPump();
+    iconPump();
     ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(10));
   }
 }
@@ -433,6 +631,49 @@ void mapControl(const Message& m) {
   s_mapRx = MapJob{buf, m.size, m.w, m.h, m.lat, m.lon, m.mpp, static_cast<uint8_t>(m.id)};
   memcpy(s_mapRx.attr, m.attr, sizeof(s_mapRx.attr));
   s_mapSlot.begin(static_cast<uint8_t>(m.id), m.size);
+  if (old) heap_caps_free(old);
+}
+
+void imgControl(const Message& m) {
+  if (m.op == TransferOp::Clear) {
+    s_imgSlot.close();
+    s_imgClear.store(true);
+    if (s_worker) xTaskNotifyGive(s_worker);
+    return;
+  }
+  if (m.op != TransferOp::Begin) return;
+  if (m.w != Wallpaper::kSize || m.h != Wallpaper::kSize || m.size == 0 || m.size > kWallJpgMax ||
+      s_wallBuf[0] == nullptr || s_wallBuf[1] == nullptr) {
+    queueState("img", "error", m.id, "unsupported");
+    return;
+  }
+  uint8_t* buf = static_cast<uint8_t*>(heap_caps_malloc(m.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (buf == nullptr) {
+    queueState("img", "error", m.id, "no memory");
+    return;
+  }
+  uint8_t* old = s_imgRx;
+  s_imgRx = buf;
+  s_imgSlot.begin(static_cast<uint8_t>(m.id), m.size);
+  if (old) heap_caps_free(old);
+}
+
+void iconControl(const Message& m) {
+  if (m.op != TransferOp::Begin) return;
+  if (m.w != AppIcon::kSize || m.h != AppIcon::kSize || m.size == 0 || m.size > kIconJpgMax || m.app[0] == 0 ||
+      s_iconTmp == nullptr) {
+    queueState("icon", "error", m.id, "unsupported");
+    return;
+  }
+  uint8_t* buf = static_cast<uint8_t*>(heap_caps_malloc(m.size, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  if (buf == nullptr) {
+    queueState("icon", "error", m.id, "no memory");
+    return;
+  }
+  uint8_t* old = s_iconRx;
+  s_iconRx = buf;
+  snprintf(s_iconRxApp, sizeof(s_iconRxApp), "%s", m.app);
+  s_iconSlot.begin(static_cast<uint8_t>(m.id), m.size);
   if (old) heap_caps_free(old);
 }
 
@@ -482,8 +723,10 @@ void otaControl(const Message& m) {
   postCmd(c);
 }
 
-/** Map / route bytes: straight into their PSRAM buffer. */
-void takeInto(bulk::Slot& slot, uint8_t* dst, const bulk::Chunk& ch, bool isMap) {
+enum class Into : uint8_t { Map, Route, Image, Icon };
+
+/** Map / route / picture bytes: straight into their PSRAM buffer. */
+void takeInto(bulk::Slot& slot, uint8_t* dst, const bulk::Chunk& ch, Into kind) {
   const uint32_t at = slot.next();
   const bulk::Slot::Verdict v = slot.offer(ch.offset, ch.len);
   if (v == bulk::Slot::Verdict::AskFrom) {
@@ -496,7 +739,30 @@ void takeInto(bulk::Slot& slot, uint8_t* dst, const bulk::Chunk& ch, bool isMap)
   if (slot.stored(slot.next(), ack)) sendGotNow(slot.id(), ack);
   if (!slot.received()) return;
   slot.close();
-  if (isMap) {
+  if (kind == Into::Icon) {
+    uint8_t* dropped = nullptr;
+    portENTER_CRITICAL(&s_lock);
+    dropped = s_iconJob;  // one waiting at a time: the newer one wins (the app asks again)
+    s_iconJob = s_iconRx;
+    s_iconJobLen = slot.size();
+    s_iconJobId = slot.id();
+    memcpy(s_iconJobApp, s_iconRxApp, sizeof(s_iconJobApp));
+    portEXIT_CRITICAL(&s_lock);
+    s_iconRx = nullptr;
+    if (dropped) heap_caps_free(dropped);
+    if (s_worker) xTaskNotifyGive(s_worker);
+  } else if (kind == Into::Image) {
+    uint8_t* dropped = nullptr;
+    portENTER_CRITICAL(&s_lock);
+    dropped = s_imgJob;  // a newer picture replaces one not decoded yet
+    s_imgJob = s_imgRx;
+    s_imgJobLen = slot.size();
+    s_imgJobId = slot.id();
+    portEXIT_CRITICAL(&s_lock);
+    s_imgRx = nullptr;
+    if (dropped) heap_caps_free(dropped);
+    if (s_worker) xTaskNotifyGive(s_worker);
+  } else if (kind == Into::Map) {
     MapJob dropped;
     portENTER_CRITICAL(&s_lock);
     if (s_jobPending) dropped = s_job;  // a newer image replaces one not decoded yet
@@ -536,6 +802,14 @@ bool begin() {
       Serial.println("transfers: no PSRAM for the map buffers - no map");
     }
   }
+  const size_t wallBytes = static_cast<size_t>(Wallpaper::kSize) * Wallpaper::kSize * 2;
+  for (auto& b : s_wallBuf) b = static_cast<uint16_t*>(heap_caps_malloc(wallBytes, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  loadWallpaper();
+  s_iconTmp = static_cast<uint16_t*>(heap_caps_malloc(kIconPx * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  for (IconSlot& slot : s_icons) {
+    slot = IconSlot{};
+    slot.px = static_cast<uint16_t*>(heap_caps_malloc(kIconPx * 2, MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+  }
   // Core 0 next to BLE, the push and the second drawing task (same priority: it takes turns
   // with the drawing instead of waiting for a gap that never comes in a busy layout).
   xTaskCreatePinnedToCore(workerTask, "bulk", 8192, nullptr, 2, &s_worker, 0);
@@ -556,6 +830,12 @@ void control(const Message& m) {
     case MsgType::Route:
       routeControl(m);
       break;
+    case MsgType::Image:
+      imgControl(m);
+      break;
+    case MsgType::Icon:
+      iconControl(m);
+      break;
     default:
       break;
   }
@@ -568,11 +848,19 @@ void onBulk(const uint8_t* data, size_t len) {
   if (!bulk::parseChunk(data, len, ch)) return;
 
   if (s_mapSlot.active() && ch.id == s_mapSlot.id()) {
-    takeInto(s_mapSlot, s_mapRx.jpg, ch, true);
+    takeInto(s_mapSlot, s_mapRx.jpg, ch, Into::Map);
     return;
   }
   if (s_routeSlot.active() && ch.id == s_routeSlot.id()) {
-    takeInto(s_routeSlot, s_routeRx, ch, false);
+    takeInto(s_routeSlot, s_routeRx, ch, Into::Route);
+    return;
+  }
+  if (s_imgSlot.active() && ch.id == s_imgSlot.id()) {
+    takeInto(s_imgSlot, s_imgRx, ch, Into::Image);
+    return;
+  }
+  if (s_iconSlot.active() && ch.id == s_iconSlot.id()) {
+    takeInto(s_iconSlot, s_iconRx, ch, Into::Icon);
     return;
   }
 
@@ -606,12 +894,22 @@ void onDisconnect() {
   s_authorized.store(false);
   s_mapSlot.close();
   s_routeSlot.close();
+  s_imgSlot.close();
+  s_iconSlot.close();
   Cmd c{};
   c.kind = Cmd::Disconnected;
   postCmd(c);
 }
 
 void frameBegin(uint64_t nowMs) {
+  if (s_wallDrop.exchange(false)) s_haveWall = false;
+  if (s_wallSwap.load()) {
+    s_wallFront = 1 - s_wallFront;
+    s_wallImg.px = s_wallBuf[s_wallFront];
+    s_haveWall = true;
+    s_wallSwap.store(false);
+    if (s_worker) xTaskNotifyGive(s_worker);
+  }
   if (s_swapPending.load()) {
     s_front = 1 - s_front;
     s_frontImg = s_backImg;
@@ -645,6 +943,37 @@ void frameBegin(uint64_t nowMs) {
 const MapImage* map() { return s_haveFront ? &s_frontImg : nullptr; }
 
 const RouteLine* route() { return s_haveRoute ? &s_routeLine : nullptr; }
+
+const Wallpaper* wallpaper() { return s_haveWall ? &s_wallImg : nullptr; }
+
+bool hasWallpaper() { return s_wallStored.load(); }
+
+const AppIcon* icon(const char* app) {
+  if (app == nullptr || app[0] == 0) return nullptr;
+  const uint16_t* px = nullptr;
+  portENTER_CRITICAL(&s_lock);
+  for (int i = 0; i < kIcons; i++) {
+    if (s_icons[i].ready && strcmp(s_icons[i].app, app) == 0) {
+      px = s_icons[i].px;
+      s_iconShown = i;
+      s_icons[i].used = ++s_iconClock;
+      break;
+    }
+  }
+  portEXIT_CRITICAL(&s_lock);
+  if (px == nullptr) return nullptr;
+  s_iconView.px = px;
+  return &s_iconView;
+}
+
+bool hasIcon(const char* app) {
+  if (app == nullptr || app[0] == 0) return false;
+  bool found = false;
+  portENTER_CRITICAL(&s_lock);
+  for (int i = 0; i < kIcons && !found; i++) found = s_icons[i].ready && strcmp(s_icons[i].app, app) == 0;
+  portEXIT_CRITICAL(&s_lock);
+  return found;
+}
 
 Frame::Update update() {
   portENTER_CRITICAL(&s_lock);

@@ -4,6 +4,9 @@
 // picture's rotation.
 
 #include <cstddef>
+#include <cstdint>
+
+#include "core/model.h"
 
 namespace monav::device::storage {
 
@@ -24,5 +27,14 @@ void saveLayout(int layout);
 
 int loadRotation();  // −1 when nothing is stored, else 0..359
 void saveRotation(int degrees);
+
+bool loadStyle(monav::Style& out);
+void saveStyle(const monav::Style& style);
+
+/** The iPhone notification settings (cfg.ntf, cfg.ntfText); false when nothing is stored. */
+bool loadNotices(monav::NoticeMode& mode, bool& text, bool& full);
+void saveNotices(monav::NoticeMode mode, bool text, bool full);
+uint32_t loadBestRun();  // 0 when none is stored
+void saveBestRun(uint32_t ms);
 
 }  // namespace monav::device::storage

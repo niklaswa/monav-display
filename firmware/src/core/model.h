@@ -85,13 +85,39 @@ struct Chargers {
   int count = 0;
 };
 
-enum class MsgType : uint8_t { Unknown, Hello, Vehicle, Scene, Config, Bye, Ota, Map, Route, Dev, Chargers };
+enum class MsgType : uint8_t {
+  Unknown, Hello, Vehicle, Scene, Config, Bye, Ota, Map, Route, Dev, Chargers, Image, Battery, Icon,
+};
 
-/** What a tap on the glass picked (reported as `layout` in welcome and status). */
-enum class Layout : uint8_t { Hud, Focus, Map };
+/**
+ * Which of the iPhone's notifications the display shows (`cfg.ntf`, 0.2.11). Anything but Off
+ * bonds the display with the iPhone and subscribes to its notifications (ANCS).
+ */
+enum class NoticeMode : uint8_t { Off, Calls, All };
 
-/** `op` of the ota / map / route messages. */
-enum class TransferOp : uint8_t { None, Begin, End, Abort, Clear };
+/**
+ * The look of the screens without a drive — welcome, connected, standby (`cfg.theme`, 0.2.7).
+ * Photo is the picture the phone sent (`img`); without one it falls back to Classic.
+ */
+enum class Theme : uint8_t { Classic, Aurora, Orbit, Retro, Photo, Chrono, Stopwatch, Count };
+
+/** What the phone set for the look; kept on the display. */
+struct Style {
+  Theme theme = Theme::Classic;
+  bool eggs = true;     // the little surprises (`cfg.eggs`)
+  char name[24] = {0};  // greeted by name on the welcome screen (`cfg.name`), empty: no name
+  bool intro = false;   // the performance intro before the greeting (`cfg.intro`, 0.2.9)
+};
+
+/**
+ * What a tap on the glass picked (reported as `layout` in welcome and status), or the phone set
+ * (`cfg.layout`, 0.2.7). Clock: the chronograph stays on during the drive, speed and limit in its
+ * small dials.
+ */
+enum class Layout : uint8_t { Hud, Focus, Map, Clock };
+
+/** `op` of the ota / map / route / img / icon messages. */
+enum class TransferOp : uint8_t { None, Begin, End, Abort, Clear, Missing };
 
 /** One parsed phone → display message. Only the fields of its type are meaningful. */
 struct Message {
@@ -126,13 +152,35 @@ struct Message {
   // chg
   Chargers chargers;
 
+  // bat (0.2.7): the car is charging
+  bool batOn = false;
+  float soc = -1;  // percent; −1 = not in the message
+  float kw = -1;   // charging power
+  float km = -1;   // range
+
   // cfg
   int bright = -1;  // -1 = not in the message
   bool hasTilt = false;
   bool tilt = true;
   int rot = -1;  // degrees clockwise, 0..359; -1 = not in the message
+  bool hasTheme = false;  // cfg (0.2.7): the look of the screens without a drive
+  Theme theme = Theme::Classic;
+  bool hasEggs = false;
+  bool eggs = true;
+  bool hasName = false;
+  char name[24] = {0};
+  bool hasIntro = false;
+  bool intro = false;
+  bool hasLaunch = false;  // cfg (0.2.7): time 0–100 km/h (the phone has the car's speed)
+  bool launch = false;
+  bool hasNotices = false;  // cfg (0.2.11): the iPhone's notifications
+  NoticeMode notices = NoticeMode::Off;
+  bool hasNoticeText = false;  // cfg (0.2.11): the message text too, not just app and sender
+  bool noticeText = false;
+  bool hasNoticeFull = false;  // cfg (0.2.11): over the whole glass while driving too
+  bool noticeFull = false;
 
-  // ota / map / route
+  // ota / map / route / img
   TransferOp op = TransferOp::None;
   int id = 0;
   uint32_t size = 0;
@@ -141,8 +189,9 @@ struct Message {
   int w = 0, h = 0;        // map: pixels
   float mpp = 0;           // map: metres per pixel
   char attr[40] = {0};     // map: whom the picture is credited to
+  char app[64] = {0};      // icon: the bundle identifier it is for
 
-  // dev (only honoured by builds with MONAV_DEV_TOKEN)
+  // cfg (0.2.7), dev (any build with MONAV_DEV_TOKEN)
   bool hasLayout = false;
   Layout layout = Layout::Hud;
 };

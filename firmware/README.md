@@ -84,7 +84,7 @@ NVS. Reflashing never leaves a stale bond on the phone. A display paired with on
 
 | Gesture | What it does |
 | --- | --- |
-| Tap | Drive HUD → focus layout (speed and limit only, bigger) → map → HUD; remembered, and reported to Monav with `status` (Monav renders map images only in the map layout) |
+| Tap | Drive HUD → focus layout (speed and limit only, bigger) → map → clock → HUD; remembered, and reported to Monav with `status` (Monav renders map images only in the map layout) |
 | Swipe left / right | Brightness down / up in 10 % steps (saved, and reported to Monav with `status`) |
 | Hold 3 s | **Kopplung zurücksetzen?** — a tap within 5 s forgets the paired iPhone |
 | BOOT held 3 s | Forgets the paired iPhone without asking |
@@ -99,7 +99,7 @@ The display's own texts are German; Monav's `hello` with `"lang":"en"` switches 
 
 | | |
 | --- | --- |
-| Start | Monav's traffic light lights up red, amber, green |
+| Start | Monav's traffic light lights up red, amber, green — or, with the performance intro on, the jump to hyperspace |
 | Waiting | Bluetooth pulse, **Warte auf Monav** and the id; when not paired yet **Bereit zum Koppeln** and where to pair in the app |
 | Gekoppelt | Green check animation after a fresh pairing |
 | Denied | **Gehört zu einem anderen iPhone** and *3 s halten zum Zurücksetzen* |
@@ -107,6 +107,20 @@ The display's own texts are German; Monav's `hello` with `"lang":"en"` switches 
 | Drive HUD | While `v` messages arrive, see below |
 | Link lost | No `v` for more than 3 s, or the phone disconnected mid-drive: the HUD dims and shows **Verbindung unterbrochen**; after 20 s it goes back to waiting (or connected) |
 | Standby | After `bye`: the clock and **Bis bald**; dims after a minute |
+| Welcome | When the phone connects: a greeting by the time of day (and name), in the theme's look |
+| Charging | While `bat` comes: the ring fills to the battery's level, the percentage counts up, power and range below |
+
+### Themes (0.2.7)
+
+Set from Monav (`cfg.theme`): **classic**, **aurora** (northern lights), **orbit** (a watch face with a
+seconds comet), **retro** (synthwave sun and grid), **photo** (a picture from the phone, kept in the
+flash's data partition), **chrono** and **stopwatch** (two watch faces). The watch faces can stay on
+during the drive (`clock` layout, also the fourth step of the tap cycle). `tools/preview/reel.sh`
+films every design into `preview/showreel.mp4`.
+
+**0–100 km/h** (`cfg.launch`, `core/launch.cpp`): every start from standing is timed; a run that
+reaches 100 without slowing down shows its time at the foot of the glass (a gold flash for a new
+best, kept in NVS) and goes to the phone.
 | Map | The map layout, see below; until an image under the car has arrived, the HUD with a **Karte lädt …** chip |
 | Update | A firmware update over Bluetooth: progress around the glass, percent, **Nicht ausschalten**, then **Neustart …** — or **Update fehlgeschlagen** and the old version keeps running |
 

@@ -36,6 +36,25 @@ struct MapImage {
   char attr[40] = {0};
 };
 
+/**
+ * The phone's picture for the photo theme (`img`): kSize × kSize pixels, row-major, RGB565 in the
+ * sprite byte order — already darkened where the clock and the texts go, so a frame only copies it.
+ */
+struct Wallpaper {
+  static constexpr int kSize = 466;
+  const uint16_t* px = nullptr;
+};
+
+/**
+ * An app's icon for the iPhone's notifications (`icon`, 0.2.11): kSize × kSize pixels, row-major,
+ * RGB565 in the sprite byte order, the square artwork as the App Store has it — the renderer
+ * rounds its corners.
+ */
+struct AppIcon {
+  static constexpr int kSize = 192;  // drawn up to about this size when it first appears
+  const uint16_t* px = nullptr;
+};
+
 struct RouteLine {
   const int16_t* pts = nullptr;  // pairs: metres east, metres north of (lat, lon)
   int count = 0;                 // points (pairs)

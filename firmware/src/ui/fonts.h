@@ -27,6 +27,7 @@ enum class Font : uint8_t {
   Small,    // 18 px semibold text
   Clock,    // 104 px light digits
   Tiny,     // 13 px medium text (map attribution)
+  Hero,     // 44 px semibold text, the greeting
   Count,
 };
 

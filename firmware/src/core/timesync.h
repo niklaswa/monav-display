@@ -34,6 +34,11 @@ class TimeSync {
 struct ClockTime {
   int hour = 0;
   int minute = 0;
+  int second = 0;
+  int millis = 0;
+  int day = 1;    // 1..31
+  int month = 1;  // 1..12
+  int year = 1970;
 };
 
 /**

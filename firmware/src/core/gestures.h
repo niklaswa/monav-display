@@ -17,6 +17,7 @@ enum class GestureType : uint8_t {
 struct Gesture {
   GestureType type;
   int value = 0;
+  int x = -1, y = -1;  // Tap: where it was, in the upright picture's coordinates (−1: unknown)
 };
 
 class Gestures {

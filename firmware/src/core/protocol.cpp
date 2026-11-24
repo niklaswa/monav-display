@@ -175,6 +175,20 @@ void parseScene(JsonObjectConst doc, Scene& sc) {
   }
 }
 
+/**
+ * A name cut off by copyStr may end in half a UTF-8 character: drop it, the fonts would draw a
+ * box.
+ */
+void trimUtf8(char* s) {
+  size_t n = strlen(s);
+  if (n == 0) return;
+  size_t start = n - 1;
+  while (start > 0 && (static_cast<uint8_t>(s[start]) & 0xC0) == 0x80) start--;
+  const uint8_t lead = static_cast<uint8_t>(s[start]);
+  const size_t need = lead < 0x80 ? 1 : (lead & 0xE0) == 0xC0 ? 2 : (lead & 0xF0) == 0xE0 ? 3 : 4;
+  if (n - start < need) s[start] = 0;
+}
+
 void parsePlace(JsonObjectConst obj, Message& out) {
   JsonVariantConst lat = obj["lat"], lon = obj["lon"];
   if ((lat.is<double>() || lat.is<int>()) && (lon.is<double>() || lon.is<int>())) {
@@ -186,6 +200,42 @@ void parsePlace(JsonObjectConst obj, Message& out) {
 }
 
 }  // namespace
+
+Layout layoutFromName(const char* s) {
+  if (eq(s, "map")) return Layout::Map;
+  if (eq(s, "focus")) return Layout::Focus;
+  if (eq(s, "clock")) return Layout::Clock;
+  return Layout::Hud;
+}
+
+Theme themeFromName(const char* s) {
+  if (eq(s, "aurora")) return Theme::Aurora;
+  if (eq(s, "orbit")) return Theme::Orbit;
+  if (eq(s, "retro")) return Theme::Retro;
+  if (eq(s, "photo")) return Theme::Photo;
+  if (eq(s, "chrono")) return Theme::Chrono;
+  if (eq(s, "stopwatch")) return Theme::Stopwatch;
+  return Theme::Classic;
+}
+
+const char* themeName(Theme theme) {
+  switch (theme) {
+    case Theme::Aurora:
+      return "aurora";
+    case Theme::Orbit:
+      return "orbit";
+    case Theme::Retro:
+      return "retro";
+    case Theme::Photo:
+      return "photo";
+    case Theme::Chrono:
+      return "chrono";
+    case Theme::Stopwatch:
+      return "stopwatch";
+    default:
+      return "classic";
+  }
+}
 
 bool parse(const char* json, size_t len, Message& out) {
   out = Message{};
@@ -238,6 +288,43 @@ bool parse(const char* json, size_t len, Message& out) {
       out.rot = asInt(obj["rot"], 0) % 360;
       if (out.rot < 0) out.rot += 360;
     }
+    if (const char* layout = obj["layout"]) {
+      out.hasLayout = true;
+      out.layout = layoutFromName(layout);
+    }
+    if (const char* theme = obj["theme"]) {
+      out.hasTheme = true;
+      out.theme = themeFromName(theme);
+    }
+    if (obj["intro"].is<bool>()) {
+      out.hasIntro = true;
+      out.intro = obj["intro"].as<bool>();
+    }
+    if (obj["launch"].is<bool>()) {
+      out.hasLaunch = true;
+      out.launch = obj["launch"].as<bool>();
+    }
+    if (const char* ntf = obj["ntf"]) {
+      out.hasNotices = true;
+      out.notices = eq(ntf, "all") ? NoticeMode::All : eq(ntf, "calls") ? NoticeMode::Calls : NoticeMode::Off;
+    }
+    if (obj["ntfFull"].is<bool>()) {
+      out.hasNoticeFull = true;
+      out.noticeFull = obj["ntfFull"].as<bool>();
+    }
+    if (obj["ntfText"].is<bool>()) {
+      out.hasNoticeText = true;
+      out.noticeText = obj["ntfText"].as<bool>();
+    }
+    if (obj["eggs"].is<bool>()) {
+      out.hasEggs = true;
+      out.eggs = obj["eggs"].as<bool>();
+    }
+    if (obj["name"].is<const char*>()) {
+      out.hasName = true;
+      copyStr(out.name, sizeof(out.name), obj["name"]);
+      trimUtf8(out.name);
+    }
   } else if (eq(t, "chg")) {
     out.type = MsgType::Chargers;
     for (JsonArrayConst st : obj["st"].as<JsonArrayConst>()) {
@@ -255,16 +342,32 @@ bool parse(const char* json, size_t len, Message& out) {
       }
       out.chargers.st[out.chargers.count++] = c;
     }
+  } else if (eq(t, "bat")) {
+    out.type = MsgType::Battery;
+    out.batOn = obj["on"].is<bool>() ? obj["on"].as<bool>() : true;
+    if (!obj["soc"].isNull()) out.soc = asFloat(obj["soc"]);
+    if (!obj["kw"].isNull()) out.kw = asFloat(obj["kw"]);
+    if (!obj["km"].isNull()) out.km = asFloat(obj["km"]);
+    if (!std::isfinite(out.soc) || out.soc < 0) out.soc = -1;
+    if (out.soc > 100) out.soc = 100;
+    if (!std::isfinite(out.kw)) out.kw = -1;
+    if (!std::isfinite(out.km)) out.km = -1;
   } else if (eq(t, "bye")) {
     out.type = MsgType::Bye;
-  } else if (eq(t, "ota") || eq(t, "map") || eq(t, "route")) {
-    out.type = eq(t, "ota") ? MsgType::Ota : eq(t, "map") ? MsgType::Map : MsgType::Route;
+  } else if (eq(t, "ota") || eq(t, "map") || eq(t, "route") || eq(t, "img") || eq(t, "icon")) {
+    out.type = eq(t, "ota")    ? MsgType::Ota
+               : eq(t, "map")  ? MsgType::Map
+               : eq(t, "img")  ? MsgType::Image
+               : eq(t, "icon") ? MsgType::Icon
+                               : MsgType::Route;
     const char* op = obj["op"];
-    out.op = eq(op, "begin")   ? TransferOp::Begin
-             : eq(op, "end")   ? TransferOp::End
-             : eq(op, "abort") ? TransferOp::Abort
-             : eq(op, "clear") ? TransferOp::Clear
-                               : TransferOp::None;
+    out.op = eq(op, "begin")     ? TransferOp::Begin
+             : eq(op, "end")     ? TransferOp::End
+             : eq(op, "abort")   ? TransferOp::Abort
+             : eq(op, "clear")   ? TransferOp::Clear
+             : eq(op, "missing") ? TransferOp::Missing
+                                 : TransferOp::None;
+    copyStr(out.app, sizeof(out.app), obj["app"]);
     out.id = asInt(obj["id"], 0);
     const int64_t size = asTime(obj["size"]);
     out.size = size > 0 && size < 0x7FFFFFFF ? static_cast<uint32_t>(size) : 0;
@@ -280,7 +383,7 @@ bool parse(const char* json, size_t len, Message& out) {
     const char* layout = obj["layout"];
     if (layout != nullptr) {
       out.hasLayout = true;
-      out.layout = eq(layout, "map") ? Layout::Map : eq(layout, "focus") ? Layout::Focus : Layout::Hud;
+      out.layout = layoutFromName(layout);
     }
   } else {
     out.type = MsgType::Unknown;
@@ -300,16 +403,20 @@ const char* layoutName(Layout layout) {
       return "focus";
     case Layout::Map:
       return "map";
+    case Layout::Clock:
+      return "clock";
     default:
       return "hud";
   }
 }
 
-size_t buildWelcome(char* out, size_t cap, const char* fw, const char* id, bool fresh, int bright, Layout layout) {
+size_t buildWelcome(char* out, size_t cap, const char* fw, const char* id, bool fresh, int bright, Layout layout,
+                    bool image) {
   const int n = snprintf(out, cap,
                          "{\"t\":\"welcome\",\"fw\":\"%s\",\"proto\":%d,\"id\":\"%s\",\"fresh\":%s,"
-                         "\"bright\":%d,\"layout\":\"%s\"}",
-                         fw, kVersion, id, fresh ? "true" : "false", bright, layoutName(layout));
+                         "\"bright\":%d,\"layout\":\"%s\",\"img\":%s}",
+                         fw, kVersion, id, fresh ? "true" : "false", bright, layoutName(layout),
+                         image ? "true" : "false");
   return clampLen(n, cap);
 }
 
@@ -348,6 +455,37 @@ size_t buildTransferState(char* out, size_t cap, const char* kind, const char* s
     n = snprintf(out, cap, "{\"t\":\"%s\",\"st\":\"%s\",\"id\":%d}", kind, state, id);
   }
   return clampLen(n, cap);
+}
+
+size_t buildRun(char* out, size_t cap, uint32_t ms, bool best) {
+  return clampLen(snprintf(out, cap, "{\"t\":\"run\",\"ms\":%lu,\"best\":%s}", static_cast<unsigned long>(ms),
+                           best ? "true" : "false"),
+                  cap);
+}
+
+namespace {
+/** A bundle identifier as it may go into JSON unescaped (letters, digits, dot, dash, underscore). */
+void plainId(const char* in, char* out, size_t cap) {
+  size_t n = 0;
+  for (; in != nullptr && *in != 0 && n + 1 < cap; in++) {
+    const char c = *in;
+    if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_') {
+      out[n++] = c;
+    }
+  }
+  out[n] = 0;
+}
+}  // namespace
+
+size_t buildIconRequest(char* out, size_t cap, const char* app) {
+  char id[64];
+  plainId(app, id, sizeof(id));
+  if (id[0] == 0) return 0;
+  return clampLen(snprintf(out, cap, "{\"t\":\"icon?\",\"app\":\"%s\"}", id), cap);
+}
+
+size_t buildNoticeState(char* out, size_t cap, const char* state) {
+  return clampLen(snprintf(out, cap, "{\"t\":\"ntf\",\"st\":\"%s\"}", state), cap);
 }
 
 size_t buildInfo(char* out, size_t cap, const char* fw, const char* id, bool paired) {

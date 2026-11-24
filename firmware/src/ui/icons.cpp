@@ -1,5 +1,9 @@
 #include "ui/icons.h"
 
+#include <algorithm>
+
+#include "ui/glyphs.h"
+
 #include <cmath>
 
 namespace monav::ui::icons {
@@ -307,6 +311,28 @@ void phone(Surface& s, float cx, float cy, float size, uint32_t fg) {
   const float w = size * 1.0f, h = size * 1.75f;
   gfx::strokeRoundRect(s, cx - w / 2, cy - h / 2, w, h, size * 0.22f, size * 0.13f, fg);
   gfx::line(s, cx - w * 0.16f, cy - h / 2 + size * 0.2f, cx + w * 0.16f, cy - h / 2 + size * 0.2f, size * 0.1f, fg);
+}
+
+void glyph(Surface& s, const uint8_t* mask, float cx, float cy, float size, uint32_t fg, float alpha) {
+  constexpr int kN = glyphs::kSize;
+  const float half = size / 2, step = kN / size;
+  const int y0 = std::max(gfx::ifloor(cy - half), s.oy), y1 = std::min(gfx::iceil(cy + half), s.oy + s.h);
+  const int x0 = std::max(gfx::ifloor(cx - half), 0), x1 = std::min(gfx::iceil(cx + half), s.w);
+  const uint32_t c = gfx::shade(s, fg);
+  for (int y = y0; y < y1; y++) {
+    const float sy = gfx::fminf_(gfx::fmaxf_((y + 0.5f - (cy - half)) * step - 0.5f, 0), kN - 1.001f);
+    const int iy = static_cast<int>(sy);
+    const float ty = sy - iy;
+    for (int x = x0; x < x1; x++) {
+      const float sx = gfx::fminf_(gfx::fmaxf_((x + 0.5f - (cx - half)) * step - 0.5f, 0), kN - 1.001f);
+      const int ix = static_cast<int>(sx);
+      const float tx = sx - ix;
+      const uint8_t* m = mask + iy * kN + ix;
+      const float v = (m[0] * (1 - tx) + m[1] * tx) * (1 - ty) + (m[kN] * (1 - tx) + m[kN + 1] * tx) * ty;
+      const int a = static_cast<int>(v * alpha + 0.5f);
+      if (a > 0) gfx::blendPixel(s, x, y, c, a > 255 ? 255 : a);
+    }
+  }
 }
 
 void reset(Surface& s, float cx, float cy, float size, uint32_t fg) {

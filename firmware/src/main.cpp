@@ -7,7 +7,7 @@
 //   push   core 0   pushes finished frames to the panel on the tearing-effect edge
 //   touch  core 1   CST9217 reports → finger samples
 //   nimble core 0   BLE host: reassembles + parses writes, queues them for the ui task,
-//                   takes bulk transfer bytes
+//                   takes bulk transfer bytes, talks ANCS to the iPhone (device/ancs)
 //   bulk   core 0   writes firmware updates to flash, decodes map images
 
 #include <Arduino.h>
@@ -26,6 +26,7 @@
 #include "core/gestures.h"
 #include "core/protocol.h"
 #include "core/rxstats.h"
+#include "device/ancs.h"
 #include "device/ble_link.h"
 #include "device/display.h"
 #include "device/storage.h"
@@ -57,6 +58,7 @@ MONAV_FONT(body)
 MONAV_FONT(small)
 MONAV_FONT(clock)
 MONAV_FONT(tiny)
+MONAV_FONT(hero)
 }
 
 namespace {
@@ -80,6 +82,7 @@ const uint8_t* const kFonts[static_cast<int>(ui::Font::Count)] = {
     _binary_data_fonts_small_vlw_start,
     _binary_data_fonts_clock_vlw_start,
     _binary_data_fonts_tiny_vlw_start,
+    _binary_data_fonts_hero_vlw_start,
 };
 
 uint64_t nowMs() { return static_cast<uint64_t>(esp_timer_get_time() / 1000); }
@@ -111,6 +114,9 @@ class DevicePlatform : public Platform {
   }
   bool loadToken(char* out, size_t cap) override { return device::storage::loadToken(out, cap); }
   void saveToken(const char* token) override { device::storage::saveToken(token); }
+  // The Bluetooth bond stays on a pairing reset: the same iPhone pairing again (the usual case)
+  // would otherwise hold keys the display has forgotten and have to forget the display by hand.
+  // NimBLE keeps three bonds and drops the oldest.
   void eraseToken() override { device::storage::eraseToken(); }
   int loadBrightness() override { return device::storage::loadBrightness(); }
   void saveBrightness(int percent) override { device::storage::saveBrightness(percent); }
@@ -120,6 +126,18 @@ class DevicePlatform : public Platform {
   void saveLayout(int layout) override { device::storage::saveLayout(layout); }
   int loadRotation() override { return device::storage::loadRotation(); }
   void saveRotation(int degrees) override { device::storage::saveRotation(degrees); }
+  bool loadStyle(Style& out) override { return device::storage::loadStyle(out); }
+  void saveStyle(const Style& style) override { device::storage::saveStyle(style); }
+  bool hasWallpaper() override { return device::transfers::hasWallpaper(); }
+  bool loadNotices(NoticeMode& mode, bool& text, bool& full) override {
+    return device::storage::loadNotices(mode, text, full);
+  }
+  void saveNotices(NoticeMode mode, bool text, bool full) override { device::storage::saveNotices(mode, text, full); }
+  void setNoticeLink(bool on) override { device::ancs::setEnabled(on); }
+  void noticeAction(uint32_t uid, bool positive) override { device::ancs::action(uid, positive); }
+  bool hasIcon(const char* app) override { return device::transfers::hasIcon(app); }
+  uint32_t loadBestRun() override { return device::storage::loadBestRun(); }
+  void saveBestRun(uint32_t ms) override { device::storage::saveBestRun(ms); }
   void authorizationChanged(bool authorized) override { device::transfers::setAuthorized(authorized); }
   void pairingChanged(bool paired) override {
     char info[96];
@@ -248,6 +266,12 @@ const char* screenName(const Frame& f) {
       return "connected";
     case Screen::Standby:
       return "standby";
+    case Screen::Welcome:
+      return "welcome";
+    case Screen::Charging:
+      return "charging";
+    case Screen::Intro:
+      return "intro";
     default:
       return "other";
   }
@@ -287,6 +311,23 @@ void uiTask(void*) {
       }
     }
 
+    // The iPhone's notifications (ANCS).
+    device::ancs::Event ne;
+    while (device::ancs::poll(ne)) {
+      switch (ne.kind) {
+        case device::ancs::Event::Added:
+        case device::ancs::Event::Modified:
+          s_app->notice(ne.notice, ne.kind == device::ancs::Event::Modified, now);
+          break;
+        case device::ancs::Event::Removed:
+          s_app->noticeRemoved(ne.uid, now);
+          break;
+        case device::ancs::Event::State:
+          s_app->noticeLink(ne.state, now);
+          break;
+      }
+    }
+
     // Touch → gestures, in the upright picture's coordinates (a swipe across the turned picture
     // is still a swipe across it).
     const gfx::Rotation rot(s_app->rotation());
@@ -316,6 +357,10 @@ void uiTask(void*) {
       s_app->frame(s_frame, now);
       s_frame.map = device::transfers::map();
       s_frame.route = device::transfers::route();
+      s_frame.wallpaper = device::transfers::wallpaper();
+      s_frame.noticeIcon = s_frame.notice.style != Frame::Notice::Style::None
+                               ? device::transfers::icon(s_frame.notice.app)
+                               : nullptr;
       s_frame.update = device::transfers::update();
       device::display::setRotation(s_app->rotation());
       lgfx::LGFX_Sprite& canvas = device::display::backBuffer();
@@ -448,6 +493,7 @@ void setup() {
   Serial.println("demo: scripted drive, BLE off");
 #else
   device::ble::begin(s_id);
+  device::ancs::begin();
 #endif
 
   static App app(s_platform, s_id);

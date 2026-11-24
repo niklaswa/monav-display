@@ -88,6 +88,8 @@ SPECS = [
     Spec("small", 18, 600, TEXT),
     # Standby clock.
     Spec("clock", 104, 300, CLOCK, tabular=True),
+    # The greeting on the welcome screen.
+    Spec("hero", 44, 600, TEXT),
     # The map attribution.
     Spec("tiny", 13, 500, chars((0x20, 0x7E), (0xA0, 0xFF))),
 ]

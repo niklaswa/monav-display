@@ -119,7 +119,7 @@ class InboxCallbacks : public NimBLECharacteristicCallbacks {
     s_rxEvent.kind = Event::Received;
     if (proto::parse(s_rx.message(), s_rx.length(), s_rxEvent.msg)) {
       const MsgType t = s_rxEvent.msg.type;
-      if (t == MsgType::Ota || t == MsgType::Map || t == MsgType::Route) {
+      if (t == MsgType::Ota || t == MsgType::Map || t == MsgType::Route || t == MsgType::Image || t == MsgType::Icon) {
         // Transfers are set up right here, so bytes that follow the announcement at once find it.
         transfers::control(s_rxEvent.msg);
       } else {
@@ -174,8 +174,11 @@ void begin(const char* id) {
   }
 #endif
   NimBLEDevice::setMTU(517);
-  // No bonding: a reflashed display must never leave a stale bond on the phone.
-  NimBLEDevice::setSecurityAuth(false, false, false);
+  // Bonding (Secure Connections, Just Works) - but only ever started by the display, and only once
+  // the phone asked for its notifications (device/ancs): without that the link stays unencrypted
+  // and nothing is stored on either side, so a reflashed display leaves no stale bond behind.
+  NimBLEDevice::setSecurityAuth(true, false, true);
+  NimBLEDevice::setSecurityIOCap(BLE_HS_IO_NO_INPUT_OUTPUT);
   NimBLEDevice::setPower(ESP_PWR_LVL_P9);
 
   s_server = NimBLEDevice::createServer();

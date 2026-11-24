@@ -1,6 +1,7 @@
 #pragma once
 
-// Binary transfers (PROTOCOL.md "Binary transfers"): firmware updates, map images and the route.
+// Binary transfers (PROTOCOL.md "Binary transfers"): firmware updates, map images, the route and
+// the picture for the photo theme (kept in the flash's data partition, decoded at boot).
 //
 // The control messages (ota/map/route) and the bulk writes arrive on the NimBLE host task, which
 // only bookkeeps and copies: map and route bytes go straight into PSRAM, firmware bytes into a
@@ -38,6 +39,14 @@ void onDisconnect();
 void frameBegin(uint64_t nowMs);
 const MapImage* map();
 const RouteLine* route();
+/** The phone's picture for the photo theme (nullptr when none is stored). */
+const Wallpaper* wallpaper();
+/** A picture is stored in flash (any task). */
+bool hasWallpaper();
+/** An app's icon for the notifications, nullptr until the phone sent it (UI task). */
+const AppIcon* icon(const char* app);
+/** An icon for this app is cached (any task). */
+bool hasIcon(const char* app);
 /** The firmware update for the screen (phase None when there is none). */
 Frame::Update update();
 

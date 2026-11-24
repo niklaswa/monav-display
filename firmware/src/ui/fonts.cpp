@@ -12,7 +12,7 @@ bool s_ready[kCount] = {false};
 }  // namespace
 
 const char* const kFontFiles[kCount] = {
-    "speed", "speed_xl", "speed_md", "num", "num_sm", "sign_lg", "sign_md", "sign_sm", "sign_xs", "title", "label", "body", "small", "clock", "tiny",
+    "speed", "speed_xl", "speed_md", "num", "num_sm", "sign_lg", "sign_md", "sign_sm", "sign_xs", "title", "label", "body", "small", "clock", "tiny", "hero",
 };
 
 bool initFonts(const uint8_t* const data[kCount]) {

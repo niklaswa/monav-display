@@ -71,17 +71,28 @@ bool parse(const char* json, size_t len, Message& out);
 // --- Display → phone -------------------------------------------------------------------------
 
 const char* layoutName(Layout layout);
+const char* themeName(Theme theme);
+Theme themeFromName(const char* name);
+Layout layoutFromName(const char* name);
 
-size_t buildWelcome(char* out, size_t cap, const char* fw, const char* id, bool fresh, int bright, Layout layout);
+/** `img` (0.2.7): a picture from the phone is stored (the photo theme can show it). */
+size_t buildWelcome(char* out, size_t cap, const char* fw, const char* id, bool fresh, int bright, Layout layout,
+                    bool image = false);
 size_t buildDenied(char* out, size_t cap, const char* id);
 /** `status`: brightness and/or layout (pass −1 / nullptr to leave one out). */
 size_t buildStatus(char* out, size_t cap, int bright, const Layout* layout = nullptr);
 /** `{"t":"bulk","id":7,"got":49152}` or, with `from`, the resend request. */
 size_t buildBulkGot(char* out, size_t cap, int id, uint32_t got);
 size_t buildBulkFrom(char* out, size_t cap, int id, uint32_t from);
-/** `{"t":"<kind>","st":"<state>","id":7[,"err":"…"]}` for ota and map. */
+/** `{"t":"<kind>","st":"<state>","id":7[,"err":"…"]}` for ota, map and img. */
 size_t buildTransferState(char* out, size_t cap, const char* kind, const char* state, int id,
                           const char* err = nullptr);
+/** `{"t":"run","ms":4312,"best":true}`: a 0–100 km/h run was timed. */
+size_t buildRun(char* out, size_t cap, uint32_t ms, bool best);
+/** `{"t":"icon?","app":"…"}` (0.2.11): the display has no icon for this app. 0 for an empty id. */
+size_t buildIconRequest(char* out, size_t cap, const char* app);
+/** `{"t":"ntf","st":"…"}` (0.2.11): how the link to the iPhone's notifications stands. */
+size_t buildNoticeState(char* out, size_t cap, const char* state);
 /** Value of the `info` characteristic. */
 size_t buildInfo(char* out, size_t cap, const char* fw, const char* id, bool paired);
 

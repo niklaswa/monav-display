@@ -2,6 +2,7 @@
 
 #include <lgfx/utility/lgfx_tjpgd.h>
 
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 
@@ -19,6 +20,8 @@ struct Decode {
   uint32_t w, h;
   void (*alive)();
   uint32_t blocks;
+  const uint8_t* shadeRow = nullptr;  // wallpaper: darkening per row and column (0..255)
+  const uint8_t* shadeCol = nullptr;
 };
 
 uint32_t input(void* dev, uint8_t* buf, uint32_t n) {
@@ -47,7 +50,77 @@ uint32_t output(void* dev, void* bitmap, JRECT* r) {
   return 1;
 }
 
+/** A wallpaper block: row-major, darkened by row × column. */
+uint32_t outputWallpaper(void* dev, void* bitmap, JRECT* r) {
+  Decode& d = *static_cast<Decode*>(dev);
+  if (d.alive != nullptr && (++d.blocks & 63) == 0) d.alive();
+  const uint8_t* rgb = static_cast<const uint8_t*>(bitmap);
+  for (uint32_t y = r->top; y <= r->bottom; y++) {
+    for (uint32_t x = r->left; x <= r->right; x++, rgb += 3) {
+      if (x >= d.w || y >= d.h) continue;
+      const uint32_t k = d.shadeRow[y] * d.shadeCol[x];  // 0..65025
+      const uint32_t cr = rgb[0] * k / 65025, cg = rgb[1] * k / 65025, cb = rgb[2] * k / 65025;
+      const uint16_t v = static_cast<uint16_t>(((cr & 0xF8) << 8) | ((cg & 0xFC) << 3) | (cb >> 3));
+      d.dst[y * d.w + x] = static_cast<uint16_t>((v >> 8) | (v << 8));
+    }
+  }
+  return 1;
+}
+
+/** An icon block: row-major, as it is. */
+uint32_t outputPlain(void* dev, void* bitmap, JRECT* r) {
+  Decode& d = *static_cast<Decode*>(dev);
+  if (d.alive != nullptr && (++d.blocks & 63) == 0) d.alive();
+  const uint8_t* rgb = static_cast<const uint8_t*>(bitmap);
+  for (uint32_t y = r->top; y <= r->bottom; y++) {
+    for (uint32_t x = r->left; x <= r->right; x++, rgb += 3) {
+      if (x >= d.w || y >= d.h) continue;
+      const uint16_t v = static_cast<uint16_t>(((rgb[0] & 0xF8) << 8) | ((rgb[1] & 0xFC) << 3) | (rgb[2] >> 3));
+      d.dst[y * d.w + x] = static_cast<uint16_t>((v >> 8) | (v << 8));
+    }
+  }
+  return 1;
+}
+
 }  // namespace
+
+bool decodeImage(const uint8_t* jpg, size_t len, uint16_t* dst, int w, int h, void (*alive)()) {
+  if (jpg == nullptr || dst == nullptr || len < 4 || w <= 0 || h <= 0) return false;
+  constexpr size_t kPool = 3900;
+  void* pool = malloc(kPool);
+  if (pool == nullptr) return false;
+  Decode d{jpg, len, 0, dst, static_cast<uint32_t>(w), static_cast<uint32_t>(h), alive, 0};
+  lgfxJdec dec;
+  bool ok = lgfx_jd_prepare(&dec, input, pool, kPool, &d) == JDR_OK && dec.width == w && dec.height == h;
+  if (ok) ok = lgfx_jd_decomp(&dec, outputPlain, 0) == JDR_OK;
+  free(pool);
+  return ok;
+}
+
+bool decodeWallpaper(const uint8_t* jpg, size_t len, uint16_t* dst, void (*alive)()) {
+  constexpr int n = Wallpaper::kSize;
+  if (jpg == nullptr || dst == nullptr || len < 4) return false;
+  // Darker in a band round the clock (y ≈ 250) and towards the top and foot; columns a touch
+  // darker towards the sides (the glass is round, the corners are never seen).
+  uint8_t rows[n], cols[n];
+  for (int i = 0; i < n; i++) {
+    const float y = (i - 252.0f) / 110.0f;
+    const float band = 1.0f - 0.42f * std::exp(-y * y);
+    const float edge = 1.0f - 0.25f * std::fabs((i - n / 2.0f) / (n / 2.0f));
+    rows[i] = static_cast<uint8_t>(255 * 0.86f * band * edge);
+    const float x = std::fabs((i - n / 2.0f) / (n / 2.0f));
+    cols[i] = static_cast<uint8_t>(255 * (1.0f - 0.22f * x * x));
+  }
+  constexpr size_t kPool = 3900;
+  void* pool = malloc(kPool);
+  if (pool == nullptr) return false;
+  Decode d{jpg, len, 0, dst, static_cast<uint32_t>(n), static_cast<uint32_t>(n), alive, 0, rows, cols};
+  lgfxJdec dec;
+  bool ok = lgfx_jd_prepare(&dec, input, pool, kPool, &d) == JDR_OK && dec.width == n && dec.height == n;
+  if (ok) ok = lgfx_jd_decomp(&dec, outputWallpaper, 0) == JDR_OK;
+  free(pool);
+  return ok;
+}
 
 bool decodeMap(const uint8_t* jpg, size_t len, uint16_t* dst, int w, int h, void (*alive)()) {
   if (jpg == nullptr || dst == nullptr || len < 4 || w <= 0 || h <= 0) return false;

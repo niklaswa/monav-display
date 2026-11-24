@@ -35,6 +35,9 @@ void sun(gfx::Surface& s, float cx, float cy, float size, uint32_t fg);
 /** Phone outline (another iPhone). */
 void phone(gfx::Surface& s, float cx, float cy, float size, uint32_t fg);
 
+/** A baked symbol (ui/glyphs.h), `size` pixels wide around (cx, cy). */
+void glyph(gfx::Surface& s, const uint8_t* mask, float cx, float cy, float size, uint32_t fg, float alpha = 1.0f);
+
 /** Circular arrow (reset). */
 void reset(gfx::Surface& s, float cx, float cy, float size, uint32_t fg);
 

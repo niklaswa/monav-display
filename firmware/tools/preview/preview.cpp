@@ -15,6 +15,7 @@
 #include <fstream>
 #include <functional>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <ArduinoJson.h>
@@ -79,6 +80,24 @@ class FakePlatform : public Platform {
   void log(const char* line) override {
     if (g_verbose) printf("    %s\n", line);
   }
+  Style style;
+  bool haveStyle = false;
+  bool wallpaper = false;
+  bool loadStyle(Style& out) override {
+    if (haveStyle) out = style;
+    return haveStyle;
+  }
+  void saveStyle(const Style& s) override {
+    style = s;
+    haveStyle = true;
+  }
+  bool hasWallpaper() override { return wallpaper; }
+  bool icon = false;
+  bool hasIcon(const char*) override { return icon; }
+  std::vector<std::pair<uint32_t, bool>> actions;
+  void noticeAction(uint32_t uid, bool positive) override { actions.emplace_back(uid, positive); }
+  bool noticeLinkOn = false;
+  void setNoticeLink(bool on) override { noticeLinkOn = on; }
 };
 
 constexpr const char* kToken = "9f0c4e1a7b2d4c8e9a1f3b5d7c9e0a2b";
@@ -102,14 +121,24 @@ struct Sim {
   uint64_t nextFix = 0;
   const MapImage* map = nullptr;
   const RouteLine* route = nullptr;
+  const Wallpaper* wallpaper = nullptr;
+  const AppIcon* icon = nullptr;
+  int64_t shift = 0;  // moves the phone's clock (a date, a time of day)
   Frame::Update update;
 
-  explicit Sim(bool paired, const char* id = "4F2A") : app(p, id) {
+  explicit Sim(bool paired, const char* id = "4F2A", bool intro = false) : app(p, id) {
     if (paired) p.token = kToken;
+    if (intro) {
+      p.haveStyle = true;
+      p.style.intro = true;
+    }
     app.begin(now);
   }
 
-  int64_t phone() const { return kPhone0 + static_cast<int64_t>(now) - 5000; }
+  int64_t phone() const { return kPhone0 + shift + static_cast<int64_t>(now) - 5000; }
+
+  /** The phone's clock at a local (German) date and time; call before connect(). */
+  void at(int year, int month, int day, int hour, int minute, int second = 0);
 
   /** Sends one JSON message the way the phone would: chunked, through the reassembler. */
   void send(const std::string& json) {
@@ -184,6 +213,19 @@ struct Sim {
   }
 };
 
+void Sim::at(int year, int month, int day, int hour, int minute, int second) {
+  // Days since 1970 (Howard Hinnant), German time: CEST from April to September is close enough
+  // for the dates the shots use.
+  const int y = year - (month <= 2 ? 1 : 0);
+  const int era = y / 400;
+  const int yoe = y - era * 400;
+  const int doy = (153 * (month + (month > 2 ? -3 : 9)) + 2) / 5 + day - 1;
+  const int64_t days = static_cast<int64_t>(era) * 146097 + yoe * 365 + yoe / 4 - yoe / 100 + doy - 719468;
+  const int offsetMin = month > 3 && month < 10 ? 120 : 60;
+  const int64_t ms = ((days * 86400) + hour * 3600 + minute * 60 + second - offsetMin * 60) * 1000LL;
+  shift = ms - (kPhone0 + static_cast<int64_t>(now) - 5000);
+}
+
 // --- Output ----------------------------------------------------------------------------------
 
 struct Shot {
@@ -212,6 +254,8 @@ void shoot(Sim& sim, const char* name, const char* title) {
   sim.app.frame(f, sim.now);
   f.map = sim.map;
   f.route = sim.route;
+  f.wallpaper = sim.wallpaper;
+  f.noticeIcon = strcmp(f.notice.app, "app.example.chat") == 0 ? sim.icon : nullptr;  // only the made-up chat app has one
   f.update = sim.update;
   // The device draws band by band through internal RAM; drawn straight into the canvas, the
   // frame must come out the same.
@@ -387,6 +431,22 @@ void syntheticMap(Sample& s) {
   s.img = MapImage{s.px.data(), 1024, 1024, 51.2211, 6.7841, 1.6f, 1, gfx::pack(gfx::rgb(0x2E, 0x2C, 0x48))};
 }
 
+std::vector<uint16_t> g_wallPx;
+Wallpaper g_wall;
+bool g_haveWall = false;
+
+void loadWallpaper() {
+  std::vector<uint8_t> jpg;
+  if (!readFile(g_mapDir + "/sample-wallpaper.jpg", jpg)) return;
+  g_wallPx.assign(static_cast<size_t>(Wallpaper::kSize) * Wallpaper::kSize, 0);
+  if (!ui::decodeWallpaper(jpg.data(), jpg.size(), g_wallPx.data())) {
+    printf("  !! could not decode sample-wallpaper.jpg\n");
+    return;
+  }
+  g_wall.px = g_wallPx.data();
+  g_haveWall = true;
+}
+
 void loadSamples() {
   for (const char* name : {"sample-berliner-allee", "sample-koenigsallee", "sample-a46"}) {
     Sample smp;
@@ -473,6 +533,94 @@ void sampleDrive(Sim& s, const Sample& smp, float kmh, int lim, const char* lang
   mapDrive(s, smp.img, smp.carX, smp.carY, smp.carHdg, kmh, lim, lang);
 }
 
+// --- The iPhone's notifications --------------------------------------------------------------
+
+std::vector<uint16_t> g_iconPx;
+AppIcon g_icon;
+
+/** A made-up messenger icon: a green gradient with a white speech bubble (no real app's artwork). */
+void makeIcon() {
+  constexpr int n = AppIcon::kSize;
+  g_iconPx.assign(n * n, 0);
+  for (int y = 0; y < n; y++) {
+    for (int x = 0; x < n; x++) {
+      const float t = static_cast<float>(y) / n;
+      g_iconPx[y * n + x] = gfx::pack(gfx::mix(gfx::rgb(0x5B, 0xE5, 0x6E), gfx::rgb(0x12, 0xA8, 0x3E), t));
+    }
+  }
+  gfx::Surface s{g_iconPx.data(), n, n, 1.0f, 0, 0};
+  gfx::fillRoundRect(s, n * 0.2f, n * 0.24f, n * 0.6f, n * 0.44f, n * 0.2f, 0xFFFFFF);
+  const float tail[6] = {n * 0.3f, n * 0.6f, n * 0.26f, n * 0.8f, n * 0.46f, n * 0.64f};
+  gfx::convex(s, tail, 3, 0xFFFFFF);
+  g_icon.px = g_iconPx.data();
+}
+
+ancs::Notice makeNotice(uint32_t uid, ancs::Category cat, const char* app, const char* appName, const char* title,
+                        const char* message) {
+  ancs::Notice n;
+  n.uid = uid;
+  n.category = cat;
+  snprintf(n.app, sizeof(n.app), "%s", app);
+  snprintf(n.appName, sizeof(n.appName), "%s", appName);
+  snprintf(n.title, sizeof(n.title), "%s", title);
+  snprintf(n.message, sizeof(n.message), "%s", message);
+  return n;
+}
+
+void noticeShots() {
+  const char* kMsg = "Bin in 10 Minuten da \xe2\x80\x93 soll ich noch Br\xc3\xb6tchen mitbringen? Und denk an den Schl\xc3\xbcssel f\xc3\xbcr die Garage.";
+  auto parked = [](Sim& s, bool text) {
+    s.step(2600);
+    s.connect();
+    s.sendf("{\"t\":\"cfg\",\"ntf\":\"all\",\"ntfText\":%s}", text ? "true" : "false");
+    s.step(5000);  // past the greeting
+  };
+  {
+    Sim s(true);
+    s.icon = &g_icon;
+    s.p.icon = true;
+    parked(s, true);
+    s.app.notice(makeNotice(7, ancs::Category::Social, "app.example.chat", "Chat", "Anna", kMsg), false, s.now);
+    s.step(120);
+    shoot(s, "47-notice-pop", "Mitteilung \xc2\xb7 Icon springt auf");
+    s.step(500);
+    shoot(s, "48-notice-icon", "Mitteilung \xc2\xb7 erst nur das Icon");
+    s.step(600);
+    shoot(s, "49-notice-move", "Mitteilung \xc2\xb7 Icon wandert hoch");
+    s.step(1400);
+    shoot(s, "50-notice", "Mitteilung \xc2\xb7 mit Text");
+  }
+  {
+    Sim s(true);
+    parked(s, false);
+    s.app.notice(makeNotice(8, ancs::Category::Email, "app.example.mail", "Post", "Deutsche Bahn", kMsg), false, s.now);
+    s.step(2600);
+    shoot(s, "51-notice-noicon", "Mitteilung \xc2\xb7 ohne Icon, ohne Text");
+  }
+  {
+    Sim s(true);
+    parked(s, false);
+    ancs::Notice call = makeNotice(9, ancs::Category::IncomingCall, "com.apple.mobilephone", "Telefon", "Mama", "");
+    call.flags = ancs::flag::kPositiveAction | ancs::flag::kNegativeAction;
+    s.app.notice(call, false, s.now);
+    s.step(2400);
+    shoot(s, "52-notice-call", "Anruf \xc2\xb7 annehmen / ablehnen");
+    s.app.gesture(Gesture{GestureType::Tap, 0, static_cast<int>(233 + kCallButtonDx), static_cast<int>(kCallButtonY)}, s.now);
+    if (s.p.actions.size() != 1 || !s.p.actions[0].second) printf("  !! tapping accept did not accept the call\n");
+  }
+  {
+    Sim s(true);
+    s.icon = &g_icon;
+    s.p.icon = true;
+    parked(s, true);
+    s.drive(87, 100);
+    s.step(1500);
+    s.app.notice(makeNotice(10, ancs::Category::Social, "app.example.chat", "Chat", "Anna", kMsg), false, s.now);
+    s.step(900);
+    shoot(s, "53-notice-drive", "Mitteilung w\xc3\xa4hrend der Fahrt");
+  }
+}
+
 void runAll() {
   {
     Sim s(false);
@@ -507,7 +655,7 @@ void runAll() {
     Sim s(true);
     s.step(2600);
     s.connect();
-    s.step(2000);
+    s.step(4400);
     shoot(s, "06-connected", "Verbunden");
   }
   {
@@ -556,6 +704,7 @@ void runAll() {
     Sim s(true);
     s.step(2600);
     s.connect();
+    s.step(App::kWelcomeMs);  // past the greeting
     s.drive(0, 50);
     s.step(500);
     scene(s, light(s, "red", -26000, 12000, 8, -1, nullptr));
@@ -823,6 +972,487 @@ void runAll() {
     snprintf(s.update.error, sizeof(s.update.error), "SHA-256 stimmt nicht");
     shoot(s, "33-update-failed", "Update \xc2\xb7 fehlgeschlagen");
   }
+  // --- Themes, welcome, surprises (0.2.7) ---
+  // A themed display: connected after `cfg` set the look; `welcome` shoots the greeting instead.
+  auto themed = [](const char* theme, const char* name, bool welcome, Sim& s) {
+    s.step(2600);
+    s.connect();
+    char cfg[160];
+    snprintf(cfg, sizeof(cfg), "{\"t\":\"cfg\",\"theme\":\"%s\",\"name\":\"%s\"}", theme, name);
+    s.send(cfg);
+    s.step(welcome ? 1900 : 4400);
+  };
+  {
+    Sim s(true);
+    themed("classic", "", true, s);
+    shoot(s, "37-welcome-classic", "Begr\xc3\xbc\xc3\x9fung \xc2\xb7 Klassisch");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 18, 42, 20);
+    themed("aurora", "Niklas", true, s);
+    shoot(s, "38-welcome-aurora", "Begr\xc3\xbc\xc3\x9fung \xc2\xb7 Polarlicht, Name");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 18, 44, 0);
+    themed("aurora", "", false, s);
+    shoot(s, "39-aurora", "Polarlicht \xc2\xb7 verbunden");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 10, 9, 34);
+    themed("orbit", "Niklas", true, s);
+    shoot(s, "40-welcome-orbit", "Begr\xc3\xbc\xc3\x9fung \xc2\xb7 Orbit");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 10, 9, 34);
+    themed("orbit", "", false, s);
+    shoot(s, "41-orbit", "Orbit \xc2\xb7 verbunden");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 21, 5, 0);
+    themed("retro", "Niklas", true, s);
+    s.step(600);
+    shoot(s, "42-welcome-retro", "Begr\xc3\xbc\xc3\x9fung \xc2\xb7 Retro");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 21, 7, 0);
+    themed("retro", "", false, s);
+    shoot(s, "43-retro", "Retro \xc2\xb7 verbunden");
+  }
+  {
+    Sim s(true);
+    s.wallpaper = g_haveWall ? &g_wall : nullptr;
+    s.p.wallpaper = g_haveWall;
+    s.at(2026, 11, 14, 17, 30, 0);
+    themed("photo", "Niklas", true, s);
+    shoot(s, "44-welcome-photo", "Begr\xc3\xbc\xc3\x9fung \xc2\xb7 eigenes Bild");
+  }
+  {
+    Sim s(true);
+    s.wallpaper = g_haveWall ? &g_wall : nullptr;
+    s.p.wallpaper = g_haveWall;
+    s.at(2026, 11, 14, 17, 32, 0);
+    themed("photo", "", false, s);
+    shoot(s, "45-photo", "Eigenes Bild \xc2\xb7 verbunden");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 17, 32, 0);
+    themed("photo", "", false, s);
+    shoot(s, "46-photo-missing", "Eigenes Bild fehlt \xe2\x86\x92 klassisch");
+  }
+  {
+    // Seven quick taps while parked.
+    Sim s(true);
+    themed("classic", "", false, s);
+    for (int i = 0; i < 7; i++) {
+      s.app.gesture(Gesture{GestureType::Tap}, s.now);
+      s.step(250);
+    }
+    s.step(1700);
+    shoot(s, "47-egg-warp", "\xc3\x9c" "berraschung \xc2\xb7 7\xc3\x97 tippen");
+  }
+  {
+    Sim s(true);
+    themed("classic", "", false, s);
+    s.drive(120, 0);
+    s.step(1000);
+    s.drive(142, 0);
+    s.step(900);
+    shoot(s, "48-egg-88mph", "\xc3\x9c" "berraschung \xc2\xb7 88 mph");
+  }
+  {
+    Sim s(true);
+    themed("classic", "", false, s);
+    s.drive(42, 50);
+    s.step(3600);
+    shoot(s, "49-egg-42", "\xc3\x9c" "berraschung \xc2\xb7 42 km/h");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 12, 24, 17, 12, 0);
+    themed("classic", "", false, s);
+    shoot(s, "50-christmas", "24.\xe2\x80\x93" "26. Dezember");
+  }
+  {
+    Sim s(true);
+    s.at(2027, 1, 1, 0, 14, 0);
+    themed("retro", "", false, s);
+    s.step(1300);
+    shoot(s, "51-new-year", "Neujahr, erste Stunde");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 11, 11, 0);
+    themed("aurora", "", false, s);
+    shoot(s, "52-wish", "11:11 \xc2\xb7 W\xc3\xbcnsch dir was");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 13, 37, 0);
+    themed("classic", "", false, s);
+    shoot(s, "53-leet", "13:37");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 22, 30, 0);
+    themed("orbit", "", false, s);
+    s.send("{\"t\":\"bye\"}");
+    s.step(1000);
+    shoot(s, "54-orbit-standby", "Orbit \xc2\xb7 Bis bald");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 10, 9, 34);
+    themed("chrono", "", false, s);
+    shoot(s, "55-chrono", "Chrono \xc2\xb7 verbunden");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 19, 52, 12);
+    themed("chrono", "Niklas", true, s);
+    shoot(s, "56-welcome-chrono", "Begr\xc3\xbc\xc3\x9fung \xc2\xb7 Chrono");
+  }
+  {
+    // The clock layout set from the app: the chronograph stays during the drive.
+    Sim s(true);
+    s.at(2026, 11, 14, 8, 21, 47);
+    themed("chrono", "", false, s);
+    s.send("{\"t\":\"cfg\",\"layout\":\"clock\"}");
+    s.drive(53, 50);
+    s.step(800);
+    scene(s, "\"cam\":{\"k\":\"fixed\",\"d\":320,\"vmax\":50,\"label\":\"Fester Blitzer\"}");
+    s.step(500);
+    shoot(s, "57-clock-drive", "Uhr w\xc3\xa4hrend der Fahrt \xc2\xb7 Blitzer");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 16, 4, 5);
+    themed("classic", "", false, s);
+    s.send("{\"t\":\"cfg\",\"layout\":\"clock\"}");
+    s.drive(118, 120);
+    s.step(1300);
+    shoot(s, "58-clock-drive-motorway", "Uhr w\xc3\xa4hrend der Fahrt \xc2\xb7 120");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 10, 9, 34);
+    themed("stopwatch", "", false, s);
+    shoot(s, "59-stopwatch", "Stoppuhr \xc2\xb7 verbunden");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 19, 52, 12);
+    themed("stopwatch", "Niklas", true, s);
+    s.step(900);
+    shoot(s, "60-welcome-stopwatch", "Begr\xc3\xbc\xc3\x9fung \xc2\xb7 Stoppuhr");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 8, 21, 47);
+    themed("stopwatch", "", false, s);
+    s.send("{\"t\":\"cfg\",\"layout\":\"clock\"}");
+    s.drive(57, 50);
+    s.step(1300);
+    shoot(s, "61-stopwatch-drive", "Stoppuhr w\xc3\xa4hrend der Fahrt");
+  }
+  // 0–100 km/h: standing, then evenly to 100 in 4.3 s.
+  auto launchRun = [](Sim& s, uint32_t untilMs) {
+    s.step(2600);
+    s.connect();
+    s.send("{\"t\":\"cfg\",\"launch\":true}");
+    s.step(App::kWelcomeMs);
+    s.drive(0, 0);
+    s.step(1600);
+    for (uint32_t t = 0; t < untilMs; t += 33) {
+      s.kmh = std::min(118.0f, t * 100.0f / 4300.0f);
+      s.step(33);
+    }
+  };
+  // The performance intro: stars, the tunnel, the jump, the flash — then the greeting.
+  for (auto [name, title, ms] : {std::make_tuple("67-intro-stars", "Performance-Intro \xc2\xb7 Sterne", 500),
+                                 std::make_tuple("68-intro-tunnel", "Performance-Intro \xc2\xb7 Tunnel", 1100),
+                                 std::make_tuple("69-intro-jump", "Performance-Intro \xc2\xb7 Sprung", 1900),
+                                 std::make_tuple("70-intro-flash", "Performance-Intro \xc2\xb7 Blitz", 2750),
+                                 std::make_tuple("71-intro-welcome", "Performance-Intro \xc2\xb7 Begr\xc3\xbc\xc3\x9fung", 3350)}) {
+    Sim s(true);
+    s.at(2026, 11, 16, 18, 5, 0);
+    s.step(2600);
+    s.connect();
+    s.send("{\"t\":\"cfg\",\"intro\":true,\"name\":\"Niklas\"}");
+    // The intro is set after this hello: the next connection plays it.
+    s.app.disconnected(s.now);
+    s.step(500);
+    s.connect();
+    s.step(ms);
+    shoot(s, name, title);
+  }
+  {
+    // Powered up with the intro on: the jump instead of the traffic light, then waiting.
+    Sim s(true, "4F2A", true);
+    s.step(1700);
+    shoot(s, "72-boot-intro", "Start mit Performance-Intro");
+    s.step(1500);
+    shoot(s, "73-boot-intro-waiting", "Nach dem Intro \xc2\xb7 warten");
+  }
+  // At the charger: the ring fills in, then the energy runs.
+  for (auto [name, title, soc, kw, ms] : {std::make_tuple("64-charging-in", "Laden \xc2\xb7 f\xc3\xbcllt sich", 64.0, 142.0, 900),
+                                          std::make_tuple("65-charging", "Laden \xc2\xb7 Supercharger", 64.0, 142.0, 3200),
+                                          std::make_tuple("66-charging-low", "Laden \xc2\xb7 Akku leer, AC", 12.0, 10.8, 3200)}) {
+    Sim s(true);
+    s.step(2600);
+    s.connect();
+    s.step(App::kWelcomeMs);
+    char bat[96];
+    snprintf(bat, sizeof(bat), "{\"t\":\"bat\",\"soc\":%.1f,\"kw\":%.1f,\"km\":%d}", soc, kw, static_cast<int>(soc * 5.1));
+    s.send(bat);
+    s.step(ms);
+    shoot(s, name, title);
+  }
+  {
+    Sim s(true);
+    launchRun(s, 2700);
+    shoot(s, "62-launch-live", "0\xe2\x80\x93" "100 \xc2\xb7 l\xc3\xa4uft");
+  }
+  {
+    Sim s(true);
+    launchRun(s, 4900);
+    shoot(s, "63-launch-best", "0\xe2\x80\x93" "100 \xc2\xb7 neue Bestzeit");
+  }
+}
+
+
+// --- Showreel (-reel): every design animated, frame by frame ----------------------------------------
+
+int g_reelFrame = 0;
+FILE* g_reelCaptions = nullptr;
+
+/** Films `ms` of the sim at 30 frames a second; `each` runs before every frame (t in seconds). */
+void film(Sim& sim, uint32_t ms, const char* title, const std::function<void(Sim&, float)>& each = nullptr) {
+  fprintf(g_reelCaptions, "%d\t%s\n", g_reelFrame, title);
+  ui::setBandBuffers(nullptr, nullptr, 0);
+  std::vector<uint8_t> rgb;
+  for (uint32_t t = 0; t < ms; t += 33) {
+    if (each) each(sim, t / 1000.0f);
+    sim.step(33);
+    Frame f;
+    sim.app.frame(f, sim.now);
+    f.map = sim.map;
+    f.route = sim.route;
+    f.wallpaper = sim.wallpaper;
+    f.noticeIcon = strcmp(f.notice.app, "app.example.chat") == 0 ? sim.icon : nullptr;  // only the made-up chat app has one
+    f.update = sim.update;
+    ui::render(*g_canvas, f);
+    gfx::Surface sf{static_cast<uint16_t*>(g_canvas->getBuffer()), kSize, kSize, 1.0f};
+    gfx::maskCircle(sf, kSize / 2.0f, kSize / 2.0f, kSize / 2.0f);
+    toRgb(*g_canvas, rgb);
+    char path[512];
+    snprintf(path, sizeof(path), "%s/frame_%05d.png", g_outDir.c_str(), g_reelFrame++);
+    png::write(path, rgb.data(), kSize, kSize);
+  }
+}
+
+void reel() {
+  const std::string captions = g_outDir + "/captions.tsv";
+  g_reelCaptions = fopen(captions.c_str(), "w");
+  if (g_reelCaptions == nullptr) return;
+  auto look = [](Sim& s, const char* theme, const char* name) {
+    s.step(2600);
+    s.connect();
+    char cfg[160];
+    snprintf(cfg, sizeof(cfg), "{\"t\":\"cfg\",\"theme\":\"%s\",\"name\":\"%s\"}", theme, name);
+    s.send(cfg);
+  };
+  {
+    Sim s(true);
+    film(s, 2600, "Start");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 7, 42, 10);
+    look(s, "classic", "");
+    film(s, 5200, "Klassisch \xc2\xb7 Begr\xc3\xbc\xc3\x9fung beim Einsteigen");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 18, 42, 20);
+    look(s, "aurora", "Niklas");
+    film(s, 5600, "Polarlicht");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 10, 9, 30);
+    look(s, "orbit", "Niklas");
+    film(s, 5200, "Orbit");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 21, 5, 0);
+    look(s, "retro", "Niklas");
+    film(s, 5600, "Retro");
+  }
+  {
+    Sim s(true);
+    s.wallpaper = g_haveWall ? &g_wall : nullptr;
+    s.p.wallpaper = g_haveWall;
+    s.at(2026, 11, 14, 17, 30, 0);
+    look(s, "photo", "Niklas");
+    film(s, 5200, "Eigenes Bild");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 19, 52, 12);
+    look(s, "chrono", "Niklas");
+    film(s, 5600, "Chrono");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 8, 21, 5);
+    look(s, "stopwatch", "Niklas");
+    film(s, 5600, "Stoppuhr");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 8, 30, 0);
+    s.step(2600);
+    s.connect();
+    s.drive(20, 50);
+    s.step(300);
+    scene(s, light(s, "red", -20000, 9000, 230, 0, nullptr));
+    film(s, 4500, "Fahrt \xc2\xb7 Ampel", [](Sim& sim, float t) {
+      sim.kmh = std::max(0.0f, 38 - t * 9);
+    });
+  }
+  {
+    const Sample& smp = sampleNamed("sample-berliner-allee");
+    Route route = makeRoute(smp.img, smp.route);
+    Sim s(true);
+    s.at(2026, 11, 14, 8, 31, 0);
+    sampleDrive(s, smp, 46, 50);
+    s.route = &route.line;
+    scene(s, "\"turn\":{\"k\":\"right\",\"d\":430,\"road\":\"Bahnstra\xc3\x9f" "e\"}");
+    film(s, 4500, "Fahrt \xc2\xb7 Karte");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 8, 33, 40);
+    look(s, "chrono", "");
+    s.send("{\"t\":\"cfg\",\"layout\":\"clock\"}");
+    s.drive(30, 50);
+    s.step(400);
+    scene(s, "\"cam\":{\"k\":\"fixed\",\"d\":420,\"vmax\":50,\"label\":\"Fester Blitzer\"}");
+    film(s, 5000, "Uhr w\xc3\xa4hrend der Fahrt \xc2\xb7 Chrono", [](Sim& sim, float t) {
+      sim.kmh = 30 + t * 6;
+    });
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 8, 35, 10);
+    look(s, "stopwatch", "");
+    s.send("{\"t\":\"cfg\",\"layout\":\"clock\"}");
+    s.drive(70, 100);
+    s.step(400);
+    film(s, 4500, "Uhr w\xc3\xa4hrend der Fahrt \xc2\xb7 Stoppuhr", [](Sim& sim, float t) {
+      sim.kmh = 70 + t * 7;
+    });
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 16, 18, 5, 0);
+    look(s, "classic", "Niklas");
+    s.send("{\"t\":\"cfg\",\"intro\":true}");
+    s.app.disconnected(s.now);
+    s.step(400);
+    s.connect();
+    film(s, 6200, "Performance-Intro");
+  }
+  {
+    Sim s(true);
+    look(s, "classic", "");
+    s.step(4400);
+    s.send("{\"t\":\"bat\",\"soc\":71,\"kw\":146,\"km\":362}");
+    film(s, 6000, "Laden", [](Sim& sim, float t) {
+      static int last = -1;
+      if (t < 0.05f) last = -1;
+      const int sec = static_cast<int>(t);
+      if (sec != last) {
+        last = sec;
+        char bat[96];
+        snprintf(bat, sizeof(bat), "{\"t\":\"bat\",\"soc\":%.1f,\"kw\":%.0f,\"km\":%d}", 71 + t * 0.4, 146 - t * 2,
+                 static_cast<int>(362 + t * 2));
+        sim.send(bat);
+      }
+    });
+  }
+  {
+    Sim s(true);
+    look(s, "classic", "");
+    s.send("{\"t\":\"cfg\",\"launch\":true}");
+    s.step(4400);
+    s.drive(0, 0);
+    s.step(1600);
+    film(s, 9500, "0\xe2\x80\x93" "100 km/h", [](Sim& sim, float t) {
+      sim.kmh = t < 0.6f ? 0.0f : std::min(122.0f, (t - 0.6f) * 100.0f / 4.3f);
+    });
+  }
+  {
+    Sim s(true);
+    look(s, "classic", "");
+    s.step(4400);
+    film(s, 6600, "\xc3\x9c" "berraschung \xc2\xb7 7\xc3\x97 aufs Glas tippen", [](Sim& sim, float t) {
+      const int i = static_cast<int>(t / 0.2f);
+      static int last = -1;
+      if (t < 0.05f) last = -1;
+      if (t < 1.4f && i != last) {
+        last = i;
+        sim.app.gesture(Gesture{GestureType::Tap}, sim.now);
+      }
+    });
+  }
+  {
+    Sim s(true);
+    look(s, "classic", "");
+    s.step(4400);
+    s.drive(128, 0);
+    film(s, 5000, "\xc3\x9c" "berraschung \xc2\xb7 88 mph", [](Sim& sim, float t) {
+      sim.kmh = std::min(142.0f, 128 + t * 14);
+    });
+  }
+  {
+    Sim s(true);
+    look(s, "classic", "");
+    s.step(4400);
+    s.drive(42, 50);
+    film(s, 6500, "\xc3\x9c" "berraschung \xc2\xb7 42 km/h");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 12, 24, 17, 12, 0);
+    look(s, "classic", "");
+    s.step(4400);
+    film(s, 4000, "24.\xe2\x80\x93" "26. Dezember");
+  }
+  {
+    Sim s(true);
+    s.at(2027, 1, 1, 0, 0, 30);
+    look(s, "retro", "");
+    s.step(4400);
+    film(s, 4500, "Neujahr");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 11, 11, 0);
+    look(s, "aurora", "");
+    s.step(4400);
+    film(s, 3500, "11:11");
+  }
+  fclose(g_reelCaptions);
+  printf("  %d frames\n", g_reelFrame);
 }
 
 /** Every icon at the size the cards draw it (preview/icons.png), for checking the glyphs. */
@@ -888,6 +1518,176 @@ bool loadFonts(const std::string& dir, std::vector<std::vector<uint8_t>>& store)
 
 int runChecks();  // checks.cpp
 
+/** The iPhone's notifications in one drive: a pill while moving, StandBy-like at the red light, a call. */
+void noticeReel() {
+  const std::string captions = g_outDir + "/captions.tsv";
+  g_reelCaptions = fopen(captions.c_str(), "w");
+  if (g_reelCaptions == nullptr) return;
+  const Sample& smp = sampleNamed("sample-berliner-allee");
+  Route route = makeRoute(smp.img, smp.route);
+  Sim s(true);
+  s.icon = &g_icon;
+  s.p.icon = true;
+  s.at(2026, 11, 14, 8, 31, 0);
+  sampleDrive(s, smp, 46, 50, "en");
+  s.route = &route.line;
+  s.sendf("{\"t\":\"cfg\",\"ntf\":\"all\",\"ntfText\":true}");
+  scene(s, "\"turn\":{\"k\":\"right\",\"d\":430,\"road\":\"Bahnstra\xc3\x9f" "e\"}");
+  s.step(3000);
+  film(s, 1800, "Driving \xc2\xb7 map");
+  s.app.notice(makeNotice(21, ancs::Category::Social, "app.example.chat", "Chat", "Anna",
+                          "Ten minutes away \xe2\x80\x93 want me to grab some coffee on the way?"),
+               false, s.now);
+  film(s, 4200, "While moving \xc2\xb7 small, the speed stays");
+  film(s, 3000, "Red light", [](Sim& sim, float t) { sim.kmh = std::max(0.0f, 46 - t * 17); });
+  s.kmh = 0;
+  s.app.notice(makeNotice(22, ancs::Category::Social, "app.example.chat", "Chat", "Jonas",
+                          "Are we still on for dinner at seven? I'll bring dessert."),
+               false, s.now);
+  film(s, 6200, "Stopped \xc2\xb7 like StandBy: the icon first, then the text");
+  ancs::Notice call = makeNotice(23, ancs::Category::IncomingCall, "com.apple.mobilephone", "Phone", "Mom", "");
+  call.flags = ancs::flag::kPositiveAction | ancs::flag::kNegativeAction;
+  s.app.notice(call, false, s.now);
+  film(s, 3600, "Call \xc2\xb7 answer or decline on the glass");
+  s.app.gesture(Gesture{GestureType::Tap, 0, static_cast<int>(233 + kCallButtonDx), static_cast<int>(kCallButtonY)}, s.now);
+  s.app.noticeRemoved(23, s.now);
+  film(s, 1200, "Answered");
+  film(s, 2400, "Green \xc2\xb7 off again", [](Sim& sim, float t) { sim.kmh = std::min(46.0f, t * 16); });
+  fclose(g_reelCaptions);
+  printf("  %d frames\n", g_reelFrame);
+}
+
+/**
+ * The store promo (-promo [de|en]): 15 s for the App Store videos, one continuous drive. The chronograph
+ * greets on getting in, stays on during the first metres with the speed in its dials, then the HUD with
+ * a message arriving, then a fixed camera ahead.
+ */
+void promoReel(const char* lang) {
+  const bool en = strcmp(lang, "en") == 0;
+  const std::string captions = g_outDir + "/captions.tsv";
+  g_reelCaptions = fopen(captions.c_str(), "w");
+  if (g_reelCaptions == nullptr) return;
+  Sim s(true);
+  s.icon = &g_icon;
+  s.p.icon = true;
+  s.at(2026, 11, 14, 7, 41, 52);
+  s.step(2600);
+  s.connect(kToken, lang);
+  s.send("{\"t\":\"cfg\",\"theme\":\"chrono\",\"name\":\"\",\"ntf\":\"all\",\"ntfText\":true}");
+  film(s, 3600, "Welcome");
+  s.send("{\"t\":\"cfg\",\"layout\":\"clock\"}");
+  s.drive(0, 50);
+  film(s, 3900, "Clock while driving", [](Sim& sim, float t) { sim.kmh = std::min(47.0f, t * 15.0f); });
+  s.send("{\"t\":\"cfg\",\"layout\":\"hud\"}");
+  film(s, 700, "HUD");
+  s.app.notice(makeNotice(31, ancs::Category::Social, "app.example.chat", "Chat", "Anna",
+                          en ? "Ten minutes away \xe2\x80\x93 want me to grab some coffee on the way?"
+                             : "Bin in zehn Minuten da \xe2\x80\x93 soll ich Kaffee mitbringen?"),
+               false, s.now);
+  film(s, 3400, "Message");
+  s.drive(54, 50);
+  s.step(200);
+  scene(s, en ? "\"cam\":{\"k\":\"fixed\",\"d\":260,\"vmax\":50,\"label\":\"Fixed camera\"}"
+              : "\"cam\":{\"k\":\"fixed\",\"d\":260,\"vmax\":50,\"label\":\"Fester Blitzer\"}");
+  film(s, 3400, "Camera", [](Sim& sim, float t) { sim.kmh = std::max(48.0f, 54.0f - t * 3.0f); });
+  fclose(g_reelCaptions);
+  printf("  %d frames\n", g_reelFrame);
+}
+
+/** Single glasses for the store screenshots in either language (-stills [de|en]): store-*.png. */
+void storeStills(const char* lang) {
+  const bool en = strcmp(lang, "en") == 0;
+  {
+    Sim s(true);
+    s.step(2600);
+    s.connect(kToken, lang);
+    s.drive(46, 50);
+    s.step(500);
+    scene(s, light(s, "green", -6000, 22000, 320, -1, "straight"));
+    s.step(300);
+    shoot(s, "store-light", "light");
+  }
+  {
+    const Sample& smp = sampleNamed("sample-a46");
+    Route route = makeRoute(smp.img, smp.route);
+    Sim s(true);
+    sampleDrive(s, smp, 118, 120, lang);
+    s.route = &route.line;
+    scene(s, en ? "\"turn\":{\"k\":\"keepRight\",\"d\":1800,\"road\":\"Cologne\"}"
+                : "\"turn\":{\"k\":\"keepRight\",\"d\":1800,\"road\":\"Richtung K\xc3\xb6ln\"}");
+    s.step(1500);
+    shoot(s, "store-map", "map");
+  }
+  {
+    const Sample& smp = sampleNamed("sample-berliner-allee");
+    const MapImage& m = smp.img;
+    Sim s(true);
+    sampleDrive(s, smp, 48, 50, lang);
+    s.send("{\"t\":\"cfg\",\"tilt\":false}");
+    const float pts[][4] = {{440, 680, 3, 6}, {478, 596, 0, 4}, {548, 522, 12, 16}, {612, 652, 1, 2}};
+    std::string st;
+    for (const auto& p : pts) {
+      double lat, lon;
+      localToGeo(m.lat, m.lon, (p[0] - m.w / 2.0) * m.mpp, (m.h / 2.0 - p[1]) * m.mpp, lat, lon);
+      char one[80];
+      snprintf(one, sizeof(one), "%s[%.6f,%.6f,%d,%d]", st.empty() ? "" : ",", lat, lon, (int)p[2], (int)p[3]);
+      st += one;
+    }
+    s.send("{\"t\":\"chg\",\"st\":[" + st + "]}");
+    s.step(1500);
+    shoot(s, "store-chargers", "chargers");
+  }
+  {
+    Sim s(true);
+    s.step(2600);
+    s.connect(kToken, lang);
+    s.step(App::kWelcomeMs);
+    s.send("{\"t\":\"bat\",\"soc\":64.0,\"kw\":142.0,\"km\":326}");
+    s.step(3200);
+    shoot(s, "store-charging", "charging");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 10, 9, 34);
+    s.step(2600);
+    s.connect(kToken, lang);
+    s.send("{\"t\":\"cfg\",\"theme\":\"stopwatch\",\"name\":\"\"}");
+    s.step(4400);
+    shoot(s, "store-stopwatch", "stopwatch");
+  }
+  {
+    Sim s(true);
+    s.step(2600);
+    s.connect(kToken, lang);
+    s.drive(38, 50);
+    s.step(500);
+    scene(s, std::string(en ? "\"turn\":{\"k\":\"roundabout\",\"d\":180,\"road\":\"Cologne\",\"exit\":2},"
+                            : "\"turn\":{\"k\":\"roundabout\",\"d\":180,\"road\":\"Richtung K\xc3\xb6ln\",\"exit\":2},") +
+                 light(s, "green", -4000, 9000, 520, -1, nullptr));
+    s.step(300);
+    shoot(s, "store-roundabout", "roundabout");
+  }
+  {
+    Sim s(true);
+    s.at(2026, 11, 14, 18, 44, 20);
+    s.step(2600);
+    s.connect(kToken, lang);
+    s.send("{\"t\":\"cfg\",\"theme\":\"aurora\",\"name\":\"\"}");
+    s.step(4400);
+    shoot(s, "store-aurora", "aurora");
+  }
+  {
+    const Sample& smp = sampleNamed("sample-berliner-allee");
+    Route route = makeRoute(smp.img, smp.route);
+    Sim s(true);
+    sampleDrive(s, smp, 46, 50, lang);
+    s.route = &route.line;
+    scene(s, "\"turn\":{\"k\":\"right\",\"d\":430,\"road\":\"Bahnstra\xc3\x9f" "e\"}");
+    s.step(1500);
+    shoot(s, "store-city", "city map");
+  }
+}
+
 int main(int argc, char** argv) {
   if (argc < 3) {
     fprintf(stderr, "usage: %s <fonts dir> <output dir> [-v]\n", argv[0]);
@@ -909,9 +1709,32 @@ int main(int argc, char** argv) {
   canvas.setTextWrap(false);
   g_canvas = &canvas;
 
-  printf("Rendering previews to %s\n", g_outDir.c_str());
   loadSamples();
+  loadWallpaper();
+  makeIcon();
+  if (argc > 5 && strcmp(argv[5], "-notices") == 0) {
+    makeIcon();
+    printf("Filming the notifications to %s\n", g_outDir.c_str());
+    noticeReel();
+    return 0;
+  }
+  if (argc > 5 && strcmp(argv[5], "-stills") == 0) {
+    storeStills(argc > 6 ? argv[6] : "de");
+    return 0;
+  }
+  if (argc > 5 && strcmp(argv[5], "-promo") == 0) {
+    printf("Filming the store promo to %s\n", g_outDir.c_str());
+    promoReel(argc > 6 ? argv[6] : "de");
+    return 0;
+  }
+  if (argc > 5 && strcmp(argv[5], "-reel") == 0) {
+    printf("Filming the showreel to %s\n", g_outDir.c_str());
+    reel();
+    return 0;
+  }
+  printf("Rendering previews to %s\n", g_outDir.c_str());
   runAll();
+  noticeShots();
   overview();
   ui::setBandBuffers(nullptr, nullptr, 0);
   iconSheet();

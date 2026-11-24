@@ -1,15 +1,18 @@
 #include "ui/render.h"
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 
+#include "core/app.h"
 #include "core/mapdata.h"
 #include "core/nav.h"
 #include "core/strings.h"
 #include "ui/fonts.h"
 #include "ui/maprender.h"
+#include "ui/glyphs.h"
 #include "ui/icons.h"
 #include "ui/raster.h"
 
@@ -88,7 +91,7 @@ constexpr uint32_t signRed = rgb(0xE2, 0x1F, 0x26);
 }  // namespace col
 
 // Pixel size of each font (scripts/build_fonts.py); Inter's cap height is 0.727 em.
-constexpr float kFontPx[] = {150, 196, 80, 44, 30, 52, 38, 28, 21, 30, 26, 23, 18, 104, 13};
+constexpr float kFontPx[] = {150, 196, 80, 44, 30, 52, 38, 28, 21, 30, 26, 23, 18, 104, 13, 44};
 static_assert(sizeof(kFontPx) / sizeof(kFontPx[0]) == static_cast<int>(Font::Count), "font sizes out of sync");
 float capHeight(Font f) { return kFontPx[static_cast<int>(f)] * 0.727f; }
 
@@ -715,6 +718,9 @@ void mapScreen(Ctx& x, float mx, float my, const char* num, uint32_t numColor) {
   text(x, Font::Tiny, attr, kC, 446, col::text2, textdatum_t::baseline_center, 0.8f);
 }
 
+void chronoDrive(Ctx& x);
+void stopwatchDrive(Ctx& x);
+
 void driveScreen(Ctx& x) {
   const Frame& f = x.f;
   if (f.linkLost) x.s.dim = 0.32f;
@@ -729,7 +735,11 @@ void driveScreen(Ctx& x) {
   const bool mapLayout = f.layout == Layout::Map;
   const bool mapReady = x.mapReady;
 
-  if (mapReady) {
+  if (f.layout == Layout::Clock && f.hasClock && f.theme == Theme::Stopwatch) {
+    stopwatchDrive(x);
+  } else if (f.layout == Layout::Clock && f.hasClock) {
+    chronoDrive(x);
+  } else if (mapReady) {
     mapScreen(x, x.mapX, x.mapY, num, numColor);
   } else {
     // Camera close and too fast: a red pulse glows in from the rim, under the ring.
@@ -890,36 +900,1000 @@ void deniedScreen(Ctx& x) {
   idPill(x, 372, 1.0f);
 }
 
-void clockText(Ctx& x, float baseline, uint32_t color) {
-  char buf[8];
-  snprintf(buf, sizeof(buf), "%02d:%02d", x.f.clock.hour, x.f.clock.minute);
-  text(x, Font::Clock, buf, kC, baseline, color);
+// --- Themes: the screens without a drive (0.2.7) -----------------------------------------------
+
+/** The theme as drawn: the photo theme without a picture is the classic one. */
+Theme drawnTheme(const Frame& f) {
+  return f.theme == Theme::Photo && f.wallpaper == nullptr ? Theme::Classic : f.theme;
 }
 
-void connectedScreen(Ctx& x) {
+uint32_t accentOf(Theme theme) {
+  switch (theme) {
+    case Theme::Aurora:
+      return rgb(0x5C, 0xF2, 0xC5);
+    case Theme::Orbit:
+      return rgb(0xFF, 0x9F, 0x0A);
+    case Theme::Retro:
+      return rgb(0xFF, 0x4F, 0xA3);
+    case Theme::Photo:
+      return col::white;
+    case Theme::Chrono:
+      return rgb(0xE5, 0x26, 0x1C);
+    case Theme::Stopwatch:
+      return rgb(0xF0, 0xC4, 0x1C);
+    default:
+      return col::green;
+  }
+}
+
+/** A stable pseudo-random number in 0..1 for an index (stars, snow, sparks). */
+float rnd(uint32_t i) {
+  i ^= i >> 16;
+  i *= 0x7FEB352Du;
+  i ^= i >> 15;
+  i *= 0x846CA68Bu;
+  i ^= i >> 16;
+  return static_cast<float>(i & 0xFFFFFF) / 16777215.0f;
+}
+
+/** Hue 0..1 at full saturation and value. */
+uint32_t hue(float h) {
+  h = h - std::floor(h);
+  const float r = clamp01(std::fabs(h * 6 - 3) - 1);
+  const float g = clamp01(2 - std::fabs(h * 6 - 2));
+  const float b = clamp01(2 - std::fabs(h * 6 - 4));
+  return rgb(static_cast<uint8_t>(r * 255), static_cast<uint8_t>(g * 255), static_cast<uint8_t>(b * 255));
+}
+
+/** Text with a soft dark shadow under it, for a picture behind. */
+void shadowText(Ctx& x, Font font, const char* str, float px, float py, uint32_t color, float alpha = 1.0f) {
+  text(x, font, str, px + 1.5f, py + 2.0f, col::black, textdatum_t::baseline_center, 0.55f * alpha);
+  text(x, font, str, px, py, color, textdatum_t::baseline_center, alpha);
+}
+
+// Time-of-day and calendar moments (only with the surprises on).
+bool isChristmas(const Frame& f) { return f.eggs && f.hasClock && f.clock.month == 12 && f.clock.day >= 24 && f.clock.day <= 26; }
+bool isNewYear(const Frame& f) { return f.eggs && f.hasClock && f.clock.month == 1 && f.clock.day == 1 && f.clock.hour < 1; }
+bool isWishTime(const Frame& f) {
+  return f.eggs && f.hasClock && ((f.clock.hour == 11 && f.clock.minute == 11) || (f.clock.hour == 22 && f.clock.minute == 22));
+}
+bool isLeetTime(const Frame& f) { return f.eggs && f.hasClock && f.clock.hour == 13 && f.clock.minute == 37; }
+
+/** The line under the clock: the screen's own, or what the moment calls for. */
+const char* subLine(const Frame& f, Str normal) {
+  if (isNewYear(f)) return tr(f.lang, Str::NewYear);
+  if (isChristmas(f)) return tr(f.lang, Str::Christmas);
+  if (isWishTime(f)) return tr(f.lang, Str::MakeAWish);
+  if (isLeetTime(f)) return tr(f.lang, Str::Leet);
+  return tr(f.lang, normal);
+}
+
+/** The clock's colour: 13:37 runs through the rainbow. */
+uint32_t clockColour(const Frame& f, uint32_t normal) {
+  return isLeetTime(f) ? gfx::mix(hue(f.t * 0.25f), col::white, 0.25f) : normal;
+}
+
+// --- Backgrounds -------------------------------------------------------------------------------
+
+/**
+ * Northern lights: curtains of colour over the top of the glass — a sharp lower edge, a long glow
+ * upwards, brighter and darker folds that drift. Written straight into the cleared band (it is the
+ * first thing drawn), a fall-off table instead of exp() per pixel.
+ */
+void auroraBackground(Ctx& x, float intro) {
   const Frame& f = x.f;
-  quietRing(x);
-  // Status line on top: green dot + "Verbunden".
+  constexpr int kTop = 16, kBottom = 236, kBands = 3;
+  struct Band {
+    float cy, r, w, phase;
+    uint32_t c;
+  };
+  const Band bands[kBands] = {
+      {563, 420, 22, 0.0f, rgb(0x2E, 0xF2, 0x9A)},
+      {600, 490, 18, 2.3f, rgb(0x2F, 0xB8, 0xE8)},
+      {626, 566, 16, 4.1f, rgb(0xB0, 0x4C, 0xFF)},
+  };
+  const int y0 = std::max(x.s.oy, kTop), y1 = std::min(x.s.oy + x.s.h, kBottom);
+  if (y0 < y1) {
+    static constexpr int kFall = 64;
+    uint8_t fall[kFall];
+    for (int i = 0; i < kFall; i++) {
+      const float t = i / static_cast<float>(kFall - 1);
+      fall[i] = static_cast<uint8_t>(255 * std::exp(-4.0f * t * t) * (1 - t));
+    }
+    // Per drawing task (the band task's stack is small): the curve in quarter pixels, the folds.
+    static int16_t s_centre[2][kBands][kSize];
+    static uint8_t s_fold[2][kBands][kSize];
+    int16_t (&centre)[kBands][kSize] = s_centre[x.s.lane & 1];
+    uint8_t (&fold)[kBands][kSize] = s_fold[x.s.lane & 1];
+    const float k = intro * x.s.dim * 0.92f;
+    for (int b = 0; b < kBands; b++) {
+      const Band& B = bands[b];
+      for (int px = 0; px < kSize; px++) {
+        const float dx = px - kC;
+        const float cy = B.cy - std::sqrt(B.r * B.r - dx * dx) + 10 * std::sin(px * 0.013f + f.t * 0.30f + B.phase) +
+                         5 * std::sin(px * 0.031f - f.t * 0.45f + B.phase * 2);
+        centre[b][px] = static_cast<int16_t>(cy * 4);
+        const float curtain = 0.55f + 0.45f * std::sin(px * 0.071f + f.t * 0.6f + B.phase) *
+                                          std::sin(px * 0.023f - f.t * 0.21f + B.phase);
+        const float breathe = 0.8f + 0.2f * std::sin(f.t * 0.37f + B.phase * 1.7f);
+        fold[b][px] = static_cast<uint8_t>(255 * clamp01(curtain * breathe * k));
+      }
+    }
+    for (int y = y0; y < y1; y++) {
+      uint16_t* row = gfx::rowAt(x.s, y);
+      for (int px = 0; px < kSize; px++) {
+        uint32_t r = 0, g = 0, bl = 0;
+        for (int b = 0; b < kBands; b++) {
+          const float d = y - centre[b][px] * 0.25f;
+          // Long glow above the lower edge, a quick fade below it.
+          const float t = d < 0 ? -d / (bands[b].w * 2.6f) : d / (bands[b].w * 0.45f);
+          if (t >= 1) continue;
+          const uint32_t v = fall[static_cast<int>(t * (kFall - 1))] * fold[b][px];  // 0..65025
+          const uint32_t c = bands[b].c;
+          r += ((c >> 16) & 0xFF) * v / 65025;
+          g += ((c >> 8) & 0xFF) * v / 65025;
+          bl += (c & 0xFF) * v / 65025;
+        }
+        if ((r | g | bl) == 0) continue;
+        row[px] = gfx::pack(rgb(r > 255 ? 255 : r, g > 255 ? 255 : g, bl > 255 ? 255 : bl));
+      }
+    }
+  }
+  for (int i = 0; i < 28; i++) {
+    const float sx = 70 + rnd(i * 3 + 1) * 326, sy = 40 + rnd(i * 3 + 2) * 150;
+    if (!gfx::rowsIn(x.s, sy - 3, sy + 3)) continue;
+    const float tw = 0.35f + 0.65f * (0.5f + 0.5f * std::sin(f.t * (0.6f + rnd(i) * 1.4f) + i));
+    gfx::fillCircle(x.s, sx, sy, 1.1f + rnd(i * 7) * 0.8f, col::white, 0.5f * tw * intro);
+  }
+}
+
+/** A watch face: minute ticks round the rim, a comet for the seconds. */
+void orbitDial(Ctx& x, float intro, bool hands) {
+  const Frame& f = x.f;
+  const uint32_t accent = accentOf(Theme::Orbit);
+  const int shown = static_cast<int>(60 * clamp01(intro) + 0.5f);
+  for (int i = 0; i < shown; i++) {
+    const float a = i * 6 * kDeg;
+    const float sn = std::sin(a), cs = -std::cos(a);
+    if (i % 5 == 0) {
+      gfx::line(x.s, kC + sn * 196, kC + cs * 196, kC + sn * 212, kC + cs * 212, i % 15 == 0 ? 5.0f : 3.5f,
+                i % 15 == 0 ? col::white : col::text2);
+    } else {
+      gfx::fillCircle(x.s, kC + sn * 207, kC + cs * 207, 1.6f, col::tick);
+    }
+  }
+  if (!f.hasClock) return;
+  const float sec = f.clock.second + f.clock.millis / 1000.0f;
+  const float sa = sec * 6;
+  gfx::arc(x.s, kC, kC, 224, 5, sa - 84, sa, col::black, accent, intro);
+  const float sx = kC + std::sin(sa * kDeg) * 224, sy = kC - std::cos(sa * kDeg) * 224;
+  gfx::fillCircle(x.s, sx, sy, 12, accent, 0.25f * intro);
+  gfx::fillCircle(x.s, sx, sy, 6.5f, accent, intro);
+  if (!hands) return;
+  const float ha = ((f.clock.hour % 12) + f.clock.minute / 60.0f) * 30 * kDeg;
+  const float ma = (f.clock.minute + sec / 60.0f) * 6 * kDeg;
+  gfx::line(x.s, kC - std::sin(ha) * 18, kC + std::cos(ha) * 18, kC + std::sin(ha) * 112, kC - std::cos(ha) * 112, 11,
+            col::white, intro);
+  gfx::line(x.s, kC - std::sin(ma) * 22, kC + std::cos(ma) * 22, kC + std::sin(ma) * 172, kC - std::cos(ma) * 172, 6,
+            col::white, intro);
+  gfx::fillCircle(x.s, kC, kC, 10, col::white, intro);
+  gfx::fillCircle(x.s, kC, kC, 4.5f, accent, intro);
+}
+
+constexpr float kHorizon = 318.0f;
+
+/** Synthwave: a striped sun sinking into a grid that runs towards the viewer. */
+void retroBackground(Ctx& x, float intro, float horizon = kHorizon) {
+  const Frame& f = x.f;
+  // Stars.
+  for (int i = 0; i < 24; i++) {
+    const float sx = 60 + rnd(i * 5 + 11) * 346, sy = 40 + rnd(i * 5 + 12) * (horizon - 120);
+    if (!gfx::rowsIn(x.s, sy - 2, sy + 2)) continue;
+    gfx::fillCircle(x.s, sx, sy, 1.2f, rgb(0xFF, 0xC8, 0xF0), 0.5f * intro);
+  }
+  // Haze along the horizon.
+  for (int i = 0; i < 6; i++) {
+    const float h = 14.0f;
+    gfx::fillRoundRect(x.s, 0, horizon - (i + 1) * h, kSize, h, 0, rgb(0x5A, 0x12, 0x5E), (0.30f - i * 0.05f) * intro);
+  }
+  // The sun: yellow above, magenta below, the lower half cut by widening gaps.
+  const float r = 92, cy = horizon - 26 + (1 - intro) * 110;
+  const uint32_t top = shade(x.s, rgb(0xFF, 0xD6, 0x0A)), bottom = shade(x.s, rgb(0xFF, 0x2D, 0x8A));
+  const int y0 = std::max(x.s.oy, static_cast<int>(cy - r)), y1 = std::min(x.s.oy + x.s.h, static_cast<int>(horizon));
+  for (int y = y0; y < y1; y++) {
+    const float dy = y + 0.5f - cy;
+    if (dy * dy >= r * r) continue;
+    if (dy > -12) {
+      // Gaps every 13 px, growing from 2 to 8 px towards the horizon.
+      const float k = (dy + 12) / (r + 12);
+      const float period = 13.0f, gap = 2 + 6 * k;
+      if (std::fmod(dy + 12, period) < gap) continue;
+    }
+    const float half = std::sqrt(r * r - dy * dy);
+    const uint32_t c = gfx::mix(top, bottom, clamp01((dy + r) / (2 * r)));
+    const float xl = kC - half, xr = kC + half;
+    for (int px = std::max(0, static_cast<int>(xl)); px <= std::min(kSize - 1, static_cast<int>(xr)); px++) {
+      const float cov = clamp01(std::min(px + 1 - xl, xr - px));
+      gfx::blendPixel(x.s, px, y, c, static_cast<int>(cov * 255 * intro));
+    }
+  }
+  // The grid.
+  const uint32_t grid = rgb(0xFF, 0x3C, 0xC8);
+  gfx::line(x.s, 0, horizon, kSize, horizon, 2.0f, grid, intro);
+  const float phase = std::fmod(f.t * 1.4f, 1.0f);
+  for (int k = 1; k <= 16; k++) {
+    const float d = k - phase;
+    if (d < 1.02f) continue;
+    const float y = horizon + 150.0f / d;
+    if (y > kSize) continue;
+    gfx::line(x.s, 0, y, kSize, y, 1.6f, grid, clamp01((y - horizon) / 50.0f) * 0.85f * intro);
+  }
+  for (int i = -9; i <= 9; i++) {
+    gfx::line(x.s, kC + i * 7.0f, horizon, kC + i * 92.0f, horizon + 300, 1.5f, grid, 0.7f * intro);
+  }
+}
+
+/** The phone's picture, copied row by row (it is darkened already). */
+void photoBackground(Ctx& x, float intro) {
+  const Wallpaper* w = x.f.wallpaper;
+  if (w == nullptr || w->px == nullptr) return;
+  const float k = x.s.dim * clamp01(intro);
+  const int y0 = std::max(0, x.s.oy), y1 = std::min(Wallpaper::kSize, x.s.oy + x.s.h);
+  for (int y = y0; y < y1; y++) {
+    uint16_t* dst = gfx::rowAt(x.s, y);
+    const uint16_t* src = w->px + static_cast<size_t>(y) * Wallpaper::kSize;
+    if (k >= 0.999f) {
+      memcpy(dst, src, Wallpaper::kSize * 2);
+    } else {
+      for (int px = 0; px < Wallpaper::kSize; px++) dst[px] = gfx::pack(gfx::scale(gfx::unpack(src[px]), k));
+    }
+  }
+}
+
+/** Snow (Christmas) and fireworks (New Year's first hour), over any theme. */
+void momentOverlay(Ctx& x) {
+  const Frame& f = x.f;
+  if (isChristmas(f)) {
+    for (int i = 0; i < 46; i++) {
+      const float speed = 18 + rnd(i * 13 + 1) * 26;
+      const float y = std::fmod(rnd(i * 13 + 2) * 520 + f.t * speed, 520.0f) - 30;
+      if (!gfx::rowsIn(x.s, y - 4, y + 4)) continue;
+      const float sx = rnd(i * 13 + 3) * kSize + 14 * std::sin(f.t * 0.7f + i);
+      gfx::fillCircle(x.s, sx, y, 1.4f + rnd(i * 13 + 4) * 1.8f, col::white, 0.75f);
+    }
+  }
+  if (isNewYear(f)) {
+    for (int b = 0; b < 4; b++) {
+      const float cycle = 2.6f, ph = std::fmod(f.t + b * cycle / 4, cycle) / cycle;
+      const int round = static_cast<int>((f.t + b * cycle / 4) / cycle);
+      const float bx = 110 + rnd(round * 7 + b) * 246, by = 100 + rnd(round * 7 + b + 3) * 150;
+      const uint32_t c = hue(rnd(round * 5 + b));
+      const float rad = easeOut(ph) * 78, a = 1 - ph;
+      for (int s = 0; s < 18; s++) {
+        const float ang = s * (360.0f / 18) * kDeg;
+        gfx::fillCircle(x.s, bx + std::sin(ang) * rad * 1.2f, by - std::cos(ang) * rad * 1.2f + ph * ph * 30, 3.4f, c, a);
+      }
+    }
+  }
+  if (isWishTime(f)) {
+    for (int i = 0; i < 10; i++) {
+      const float ang = (i * 36 + f.t * 20) * kDeg, rad = 150 + 12 * std::sin(f.t * 2 + i);
+      const float tw = 0.5f + 0.5f * std::sin(f.t * 3.1f + i * 1.3f);
+      const float sx = kC + std::sin(ang) * rad, sy = 236 - std::cos(ang) * rad * 0.62f;
+      gfx::line(x.s, sx - 5 * tw, sy, sx + 5 * tw, sy, 1.6f, col::amber, tw);
+      gfx::line(x.s, sx, sy - 5 * tw, sx, sy + 5 * tw, 1.6f, col::amber, tw);
+    }
+  }
+}
+
+/** "● Verbunden": the status line on top of the connected screen. */
+void statusLine(Ctx& x, float y, uint32_t color, bool shadow = false) {
+  const Frame& f = x.f;
   const char* label = tr(f.lang, Str::Connected);
   const int tw = width(x, Font::Small, label);
   const float w = tw + 18.0f;
   const float pulse = 0.6f + 0.4f * std::sin(f.t * 2 * kPi * 0.5f);
-  gfx::fillCircle(x.s, kC - w / 2 + 5, 140 - 6, 5, col::green, pulse);
-  text(x, Font::Small, label, kC - w / 2 + 18, 140, col::green, textdatum_t::baseline_left);
-  if (f.hasClock) {
-    clockText(x, 270, col::white);
-  } else {
-    gfx::fillCircle(x.s, kC, 220, 40, col::green);
-    icons::check(x.s, kC, 220, 22, 7.0f, col::black);
-  }
-  text(x, Font::Body, tr(f.lang, Str::ConnectedSub), kC, 318, col::text2);
+  if (shadow) text(x, Font::Small, label, kC - w / 2 + 19.5f, y + 2, col::black, textdatum_t::baseline_left, 0.55f);
+  gfx::fillCircle(x.s, kC - w / 2 + 5, y - 6, 5, color, pulse);
+  text(x, Font::Small, label, kC - w / 2 + 18, y, color, textdatum_t::baseline_left);
 }
 
-void standbyScreen(Ctx& x) {
+void clockText(Ctx& x, float baseline, uint32_t color) {
+  char buf[8];
+  snprintf(buf, sizeof(buf), "%02d:%02d", x.f.clock.hour, x.f.clock.minute);
+  text(x, Font::Clock, buf, kC, baseline, clockColour(x.f, color));
+}
+
+/** A small pill at the foot of the glass, for a sub line over a busy background. */
+void footPill(Ctx& x, float cy, const char* label, uint32_t color, float alpha = 1.0f, float backing = 0.72f) {
+  const int tw = width(x, Font::Small, label);
+  const float w = tw + 30.0f, h = 34.0f;
+  gfx::fillRoundRect(x.s, kC - w / 2, cy - h / 2, w, h, h / 2, col::black, backing * alpha);
+  text(x, Font::Small, label, kC, cy + capHeight(Font::Small) / 2, color, textdatum_t::baseline_center, alpha);
+}
+
+
+// --- Chrono: a sports car's dashboard chronograph -------------------------------------------------
+
+namespace chrono {
+constexpr uint32_t dial = rgb(0x0A, 0x0A, 0x0B);
+constexpr uint32_t bezel = rgb(0x2E, 0x2E, 0x31);
+constexpr uint32_t track = rgb(0x8A, 0x8A, 0x8F);
+constexpr uint32_t red = rgb(0xE5, 0x26, 0x1C);
+constexpr uint32_t lume = rgb(0xF2, 0xF0, 0xE6);
+constexpr float kTopY = 146;     // small dial at 12: the date, or the limit while driving
+constexpr float kTopR = 42;
+constexpr float kLowY = 326;     // small dial at 6: running seconds, or the speed while driving
+constexpr float kLowR = 56;
+}  // namespace chrono
+
+/** A hand from `back` behind the centre to `len`, at `deg` (0 = 12 o'clock). */
+void hand(Ctx& x, float deg, float back, float len, float w, uint32_t c, float alpha = 1.0f) {
+  const float a = deg * kDeg, sn = std::sin(a), cs = -std::cos(a);
+  gfx::line(x.s, kC - sn * back, kC - cs * back, kC + sn * len, kC + cs * len, w, c, alpha);
+}
+
+/**
+ * The face: a black dial in a thin bezel, a seconds scale 5…60, white batons, two small dials.
+ * `intro` (0..1) lets the welcome draw it in.
+ */
+void chronoDial(Ctx& x, float intro, bool smallDials = true) {
   const Frame& f = x.f;
-  quietRing(x);
-  if (f.hasClock) clockText(x, 262, rgb(0xD8, 0xD8, 0xDC));
-  text(x, Font::Body, tr(f.lang, Str::Bye), kC, 312, col::text2);
+  gfx::fillCircle(x.s, kC, kC, 229, chrono::dial, intro);
+  gfx::strokeCircle(x.s, kC, kC, 229, 3, chrono::bezel, intro);
+  const int shown = static_cast<int>(60 * clamp01(intro) + 0.5f);
+  for (int i = 0; i < shown; i++) {
+    const float a = i * 6 * kDeg, sn = std::sin(a), cs = -std::cos(a);
+    if (i % 5 == 0) {
+      // Batons; a double one at 12, none at 6 (the small dial).
+      if (i == 30) continue;
+      if (i == 0) {
+        for (float off : {-7.0f, 7.0f}) {
+          gfx::line(x.s, kC + off, kC - 216, kC + off, kC - 190, 7, chrono::lume);
+        }
+      } else {
+        gfx::line(x.s, kC + sn * 190, kC + cs * 190, kC + sn * 216, kC + cs * 216, 8, chrono::lume);
+      }
+      char num[4];
+      snprintf(num, sizeof(num), "%d", i == 0 ? 60 : i);
+      if (i != 0 && i != 30) {
+        const float r = 168;
+        text(x, Font::Small, num, kC + sn * r, kC + cs * r + capHeight(Font::Small) / 2, chrono::track);
+      }
+    } else {
+      gfx::line(x.s, kC + sn * 206, kC + cs * 206, kC + sn * 217, kC + cs * 217, 2, chrono::track);
+    }
+  }
+  (void)f;
+  if (!smallDials) return;
+  gfx::strokeCircle(x.s, kC, chrono::kTopY, chrono::kTopR, 2, chrono::bezel, intro);
+  gfx::strokeCircle(x.s, kC, chrono::kLowY, chrono::kLowR, 2, chrono::bezel, intro);
+}
+
+/** Hour and minute hands with a lume inlay, the red sweeping seconds hand on top. */
+void chronoHands(Ctx& x, float alpha, float sweep = 1.0f) {
+  const Frame& f = x.f;
+  if (!f.hasClock) return;
+  // The welcome sweeps the hands from 12 to the time, as a dashboard sweeps its needles.
+  const float k = easeOut(sweep);
+  const float sec = (f.clock.second + f.clock.millis / 1000.0f) * k;
+  const float minute = (f.clock.minute + f.clock.second / 60.0f) * k;
+  const float hour = ((f.clock.hour % 12) + f.clock.minute / 60.0f) * k;
+  hand(x, hour * 30, 22, 120, 14, chrono::lume, alpha);
+  hand(x, hour * 30, -36, 110, 5, rgb(0x2A, 0x2A, 0x2C), alpha);
+  hand(x, minute * 6, 22, 190, 10, chrono::lume, alpha);
+  hand(x, minute * 6, -36, 180, 3.5f, rgb(0x2A, 0x2A, 0x2C), alpha);
+  hand(x, sec * 6, 46, 212, 3, chrono::red, alpha);
+  const float a = sec * 6 * kDeg;
+  gfx::fillCircle(x.s, kC - std::sin(a) * 40, kC + std::cos(a) * 40, 7, chrono::red, alpha);
+  gfx::fillCircle(x.s, kC, kC, 11, chrono::red, alpha);
+  gfx::fillCircle(x.s, kC, kC, 4, chrono::dial, alpha);
+}
+
+/** Without a drive: the date at 12, running seconds at 6. */
+void chronoIdle(Ctx& x, float intro) {
+  const Frame& f = x.f;
+  chronoDial(x, intro);
+  if (f.hasClock) {
+    char date[8];
+    snprintf(date, sizeof(date), "%02d.%02d", f.clock.day, f.clock.month);
+    text(x, Font::NumSm, date, kC, chrono::kTopY + capHeight(Font::NumSm) / 2, chrono::lume,
+         textdatum_t::baseline_center, intro);
+    for (int i = 0; i < 12; i++) {
+      const float a = i * 30 * kDeg;
+      const float r0 = i % 3 == 0 ? chrono::kLowR - 14 : chrono::kLowR - 8;
+      gfx::line(x.s, kC + std::sin(a) * r0, chrono::kLowY - std::cos(a) * r0, kC + std::sin(a) * (chrono::kLowR - 3),
+                chrono::kLowY - std::cos(a) * (chrono::kLowR - 3), 2, chrono::track, intro);
+    }
+    // The small seconds step once a second, like a mechanical movement's.
+    const float a = f.clock.second * 6 * kDeg;
+    gfx::line(x.s, kC, chrono::kLowY, kC + std::sin(a) * (chrono::kLowR - 10), chrono::kLowY - std::cos(a) * (chrono::kLowR - 10),
+              2.5f, chrono::lume, intro);
+    gfx::fillCircle(x.s, kC, chrono::kLowY, 4, chrono::lume, intro);
+  }
+}
+
+/** The clock layout during a drive: the limit at 12, the speed at 6, the warnings as a chip. */
+void chronoDrive(Ctx& x) {
+  const Frame& f = x.f;
+  if (f.alert > 0 && !f.linkLost) {
+    const float pulse = 0.5f + 0.5f * std::sin(f.t * 2 * kPi * 1.4f);
+    gfx::rimGlow(x.s, kC, kC, 168, 226, 233, col::red, 0.18f + 0.42f * pulse);
+  }
+  chronoDial(x, 1.0f);
+  chronoHands(x, 1.0f);
+  // Speed and limit always on top: the small dials cover the hands.
+  gfx::fillCircle(x.s, kC, chrono::kTopY, chrono::kTopR - 1, chrono::dial);
+  gfx::strokeCircle(x.s, kC, chrono::kTopY, chrono::kTopR, 2, chrono::bezel);
+  gfx::fillCircle(x.s, kC, chrono::kLowY, chrono::kLowR - 1, chrono::dial);
+  gfx::strokeCircle(x.s, kC, chrono::kLowY, chrono::kLowR, 2, chrono::bezel);
+  if (f.limit > 0) {
+    limitSign(x, kC, chrono::kTopY, chrono::kTopR - 6, f.limit);
+  } else {
+    text(x, Font::NumSm, "–", kC, chrono::kTopY + capHeight(Font::NumSm) / 2, chrono::track);
+  }
+  char num[8];
+  snprintf(num, sizeof(num), "%ld", std::lround(f.speed < 0 ? 0 : f.speed));
+  const uint32_t status = speedStatus(f.speed, f.limit);
+  text(x, Font::Num, num, kC, chrono::kLowY + 10, status == col::green ? chrono::lume : status);
+  text(x, Font::Tiny, tr(f.lang, Str::Kmh), kC, chrono::kLowY + 32, chrono::track);
+  if (!f.linkLost && f.primary != Card::None) secondaryChip(x, f, f.primary);
+}
+
+
+// --- Stopwatch: a white seconds ring round a black centre, yellow hands -----------------------------
+
+namespace stopwatch {
+constexpr uint32_t ring = rgb(0xF1, 0xF1, 0xEE);
+constexpr uint32_t groove = rgb(0xB4, 0xB4, 0xB2);
+constexpr uint32_t ink = rgb(0x22, 0x22, 0x24);
+constexpr uint32_t centre = rgb(0x0C, 0x0C, 0x0D);
+constexpr uint32_t yellow = rgb(0xF0, 0xC4, 0x1C);
+constexpr uint32_t steel = rgb(0x9C, 0x9C, 0xA0);
+constexpr float kRingIn = 122, kRingOut = 186;
+}  // namespace stopwatch
+
+void stopwatchDial(Ctx& x, float intro) {
+  using namespace stopwatch;
+  gfx::fillCircle(x.s, kC, kC, 229, rgb(0x08, 0x08, 0x09), intro);
+  gfx::strokeCircle(x.s, kC, kC, 229, 4, rgb(0x26, 0x26, 0x28), intro);
+  // The white ring with its grooves.
+  gfx::strokeCircle(x.s, kC, kC, (kRingIn + kRingOut) / 2, kRingOut - kRingIn, ring, intro);
+  for (int i = 0; i < 9; i++) gfx::strokeCircle(x.s, kC, kC, kRingIn + 8 + i * 6.5f, 1.0f, groove, intro);
+  // The black centre, a little relief at its edge.
+  gfx::fillCircle(x.s, kC, kC, kRingIn, centre, intro);
+  gfx::strokeCircle(x.s, kC, kC, kRingIn - 4, 6, rgb(0x16, 0x16, 0x18), intro);
+  const int shown = static_cast<int>(60 * clamp01(intro) + 0.5f);
+  for (int i = 0; i < shown; i++) {
+    const float a = i * 6 * kDeg, sn = std::sin(a), cs = -std::cos(a);
+    if (i % 5 == 0) {
+      // Quarters in steel, the other fives in yellow, from the ring out to the rim.
+      const bool quarter = i % 15 == 0;
+      gfx::line(x.s, kC + sn * (kRingOut + 2), kC + cs * (kRingOut + 2), kC + sn * 218, kC + cs * 218,
+                quarter ? 5.0f : 4.5f, quarter ? steel : yellow);
+      // The numeral on a patch of white, so the grooves stop round it.
+      char num[4];
+      snprintf(num, sizeof(num), "%d", i == 0 ? 60 : i);
+      const float r = (kRingIn + kRingOut) / 2, nx = kC + sn * r, ny = kC + cs * r;
+      const int w = width(x, Font::NumSm, num);
+      gfx::fillRoundRect(x.s, nx - w / 2.0f - 3, ny - 15, w + 6, 30, 4, ring);
+      text(x, Font::NumSm, num, nx, ny + capHeight(Font::NumSm) / 2, ink);
+    } else {
+      gfx::line(x.s, kC + sn * 198, kC + cs * 198, kC + sn * 208, kC + cs * 208, 3, rgb(0xE8, 0xE8, 0xE8));
+    }
+  }
+}
+
+/** A yellow hand with a white inlay and a pointed tip. */
+void stopwatchHand(Ctx& x, float deg, float tail, float len, float w, float alpha) {
+  using namespace stopwatch;
+  const float a = deg * kDeg, sn = std::sin(a), cs = -std::cos(a);
+  const float tipBase = len - w * 1.2f;
+  gfx::line(x.s, kC - sn * tail, kC - cs * tail, kC + sn * tipBase, kC + cs * tipBase, w, yellow, alpha);
+  const float px = -cs, py = sn;  // across the hand
+  const float tip[] = {kC + sn * tipBase + px * w / 2, kC + cs * tipBase + py * w / 2, kC + sn * len, kC + cs * len,
+                       kC + sn * tipBase - px * w / 2, kC + cs * tipBase - py * w / 2};
+  gfx::convex(x.s, tip, 3, yellow, alpha);
+  gfx::line(x.s, kC + sn * 34, kC + cs * 34, kC + sn * (tipBase - 8), kC + cs * (tipBase - 8), w * 0.32f, col::white,
+            alpha);
+}
+
+void stopwatchHands(Ctx& x, float alpha, float sweep = 1.0f) {
+  using namespace stopwatch;
+  const Frame& f = x.f;
+  if (!f.hasClock) return;
+  const float k = easeOut(sweep);
+  const float sec = (f.clock.second + f.clock.millis / 1000.0f) * k;
+  const float minute = (f.clock.minute + f.clock.second / 60.0f) * k;
+  const float hour = ((f.clock.hour % 12) + f.clock.minute / 60.0f) * k;
+  stopwatchHand(x, hour * 30, 26, 118, 15, alpha);
+  stopwatchHand(x, minute * 6, 30, 176, 12, alpha);
+  hand(x, sec * 6, 42, 206, 3, yellow, alpha);
+  // The steel hub.
+  gfx::fillCircle(x.s, kC, kC, 21, rgb(0x6E, 0x6E, 0x72), alpha);
+  gfx::fillCircle(x.s, kC, kC, 18, steel, alpha);
+  gfx::fillCircle(x.s, kC - 3, kC - 3, 10, rgb(0xC9, 0xC9, 0xCD), alpha);
+  gfx::fillCircle(x.s, kC, kC, 4, rgb(0x5A, 0x5A, 0x5E), alpha);
+}
+
+/** The clock layout in the stopwatch's look: limit and speed in the black centre, over the hands. */
+void stopwatchDrive(Ctx& x) {
+  const Frame& f = x.f;
+  if (f.alert > 0 && !f.linkLost) {
+    const float pulse = 0.5f + 0.5f * std::sin(f.t * 2 * kPi * 1.4f);
+    gfx::rimGlow(x.s, kC, kC, 168, 226, 233, col::red, 0.18f + 0.42f * pulse);
+  }
+  stopwatchDial(x, 1.0f);
+  stopwatchHands(x, 1.0f);
+  if (f.limit > 0) limitSign(x, kC, 172, 32, f.limit);
+  char num[8];
+  snprintf(num, sizeof(num), "%ld", std::lround(f.speed < 0 ? 0 : f.speed));
+  const uint32_t status = speedStatus(f.speed, f.limit);
+  const int w = width(x, Font::Num, num);
+  gfx::fillRoundRect(x.s, kC - w / 2.0f - 14, 262, w + 28, 62, 16, stopwatch::centre, 0.92f);
+  text(x, Font::Num, num, kC, 302, status == col::green ? col::white : status);
+  text(x, Font::Tiny, tr(f.lang, Str::Kmh), kC, 318, col::text2);
+  if (!f.linkLost && f.primary != Card::None) secondaryChip(x, f, f.primary);
+}
+
+
+// --- Charging ----------------------------------------------------------------------------------
+
+/**
+ * The car at the charger: the ring fills up to the battery's level as the percentage counts up,
+ * energy runs along the filled part towards its glowing head, power and range below.
+ */
+void chargingScreen(Ctx& x) {
+  const Frame& f = x.f;
+  const float a = f.screenAge;
+  const float soc = f.soc < 0 ? 0 : f.soc;
+  // Fills in on arrival: the number counts along with the ring.
+  const float shown = soc * easeOut(clamp01((a - 0.2f) / 1.8f));
+  const uint32_t accent = soc < 20 ? col::amber : col::green;
+  constexpr float r = 212, w = 18;
+  gfx::strokeCircle(x.s, kC, kC, r, w, col::track);
+  const float sweep = 360.0f * shown / 100.0f;
+  if (sweep > 0.5f) {
+    gfx::arc(x.s, kC, kC, r, w, 0, sweep, gfx::mix(col::black, accent, 0.35f), accent);
+    // Energy flowing in: bright dashes riding the filled arc towards the head.
+    for (int i = 0; i < 6; i++) {
+      const float ph = std::fmod(f.t * 0.45f + i / 6.0f, 1.0f);
+      const float at = sweep * ph;
+      const float len = std::min(16.0f, sweep * 0.12f);
+      if (at - len < 0) continue;
+      gfx::arc(x.s, kC, kC, r, w * 0.38f, at - len, at, accent, col::white, 0.35f + 0.5f * ph);
+    }
+    // The head glows and breathes.
+    const float head = sweep * kDeg, pulse = 0.5f + 0.5f * std::sin(f.t * 2 * kPi * 0.7f);
+    const float hx = kC + std::sin(head) * r, hy = kC - std::cos(head) * r;
+    gfx::fillCircle(x.s, hx, hy, 18 + 6 * pulse, accent, 0.18f + 0.12f * pulse);
+    gfx::fillCircle(x.s, hx, hy, w * 0.5f + 1, col::white, 0.9f);
+  }
+
+  // "⚡ Lädt" on top.
+  const char* label = tr(f.lang, Str::Charging);
+  const int tw = width(x, Font::Small, label);
+  const float lw = tw + 22.0f;
+  const float pulse = 0.65f + 0.35f * std::sin(f.t * 2 * kPi * 0.7f);
+  icons::bolt(x.s, kC - lw / 2 + 6, 134, 9, gfx::scale(accent, pulse));
+  text(x, Font::Small, label, kC - lw / 2 + 22, 140, accent, textdatum_t::baseline_left);
+
+  char num[8];
+  snprintf(num, sizeof(num), "%d", static_cast<int>(shown + 0.5f));
+  const int nw = width(x, Font::Speed, num);
+  text(x, Font::Speed, num, kC - 14, 282, col::white);
+  text(x, Font::Title, "%", kC - 14 + nw / 2.0f + 6, 282, col::text2, textdatum_t::baseline_left);
+
+  char line[48] = "";
+  char kw[16] = "", km[16] = "";
+  if (f.chargeKw >= 0.5f) snprintf(kw, sizeof(kw), f.chargeKw >= 10 ? "%.0f kW" : "%.1f kW", f.chargeKw);
+  if (f.rangeKm >= 0) snprintf(km, sizeof(km), "%d km", static_cast<int>(f.rangeKm + 0.5f));
+  snprintf(line, sizeof(line), "%s%s%s", kw, kw[0] && km[0] ? " · " : "", km);
+  if (f.lang == Lang::De) {
+    for (char* c = line; *c; c++) if (*c == '.' && c[1] >= '0' && c[1] <= '9') *c = ',';
+  }
+  const float ta = clamp01((a - 0.6f) / 0.5f);
+  text(x, Font::Body, line, kC, 330, col::text2, textdatum_t::baseline_center, ta);
+}
+
+
+// --- Performance intro: a jump to hyperspace, the greeting out of its flash ------------------------
+
+void introScreen(Ctx& x) {
+  const Frame& f = x.f;
+  const float a = f.screenAge;  // 0 … App::kIntroMs
+  // A lavender glow blooms in from the rim, the middle stays dark: the tunnel.
+  const float bloom = clamp01((a - 0.35f) / 0.8f);
+  if (bloom > 0) {
+    uint16_t lut[256];
+    const uint32_t lavender = rgb(0x70, 0x7A, 0xF4), deep = rgb(0x14, 0x16, 0x4E);
+    for (int i = 0; i < 256; i++) {
+      const float r = std::sqrt(i / 255.0f);  // 0 middle … 1 rim
+      const float k = clamp01((r - 0.16f) / 0.84f);
+      const float s = k * k * (3 - 2 * k);
+      lut[i] = gfx::pack(gfx::scale(gfx::mix(deep, lavender, s), s * bloom * x.s.dim));
+    }
+    constexpr float kR2 = 233.0f * 233.0f;
+    for (int y = x.s.oy; y < x.s.oy + x.s.h; y++) {
+      uint16_t* row = gfx::rowAt(x.s, y);
+      const float dy = y + 0.5f - kC;
+      for (int px = 0; px < kSize; px++) {
+        const float dx = px + 0.5f - kC;
+        const int idx = static_cast<int>((dx * dx + dy * dy) * (255.0f / kR2));
+        row[px] = lut[idx > 255 ? 255 : idx];
+      }
+    }
+  }
+  // Stars that stretch into streaks as the jump speeds up.
+  const float warp = clamp01((a - 0.55f) / 1.0f);
+  const float appear = clamp01(a / 0.4f);
+  for (int i = 0; i < 220; i++) {
+    const float ang = rnd(i * 3 + 1) * 360 * kDeg;
+    const float ph = std::fmod(rnd(i * 3 + 2) + a * (0.12f + 1.5f * warp * warp) * (0.7f + 0.6f * rnd(i * 3 + 3)), 1.0f);
+    const float r0 = 34 + ph * ph * 240;
+    const float len = 1.5f + warp * (8 + ph * ph * 130);
+    const float sn = std::sin(ang), cs = -std::cos(ang);
+    const float y0 = kC + cs * r0, y1 = kC + cs * (r0 + len);
+    if (!gfx::rowsIn(x.s, std::min(y0, y1) - 3, std::max(y0, y1) + 3)) continue;
+    const uint32_t c = gfx::mix(rgb(0xB8, 0xC0, 0xFF), col::white, ph);
+    gfx::line(x.s, kC + sn * r0, y0, kC + sn * (r0 + len), y1, 1.1f + ph * 1.9f, c, clamp01(ph * 3) * appear);
+  }
+  // The flash: white from the middle until it fills the glass as the intro ends.
+  const float fl = clamp01((a - 2.25f) / 0.75f);
+  if (fl > 0) {
+    // A soft white glow growing out of the middle: full inside 40 % of its radius, fading to its
+    // edge; by the end it covers the glass.
+    const float R = 60 + fl * fl * 560;
+    const float peak = clamp01(0.4f + fl);
+    uint8_t alpha[256];
+    for (int i = 0; i < 256; i++) {
+      const float r = std::sqrt(i / 255.0f);  // of R
+      const float k = clamp01((1.0f - r) / 0.6f);
+      alpha[i] = static_cast<uint8_t>(255 * peak * k * k * (3 - 2 * k));
+    }
+    const uint32_t white = shade(x.s, col::white);
+    const float inv = 255.0f / (R * R);
+    const int y0 = std::max(x.s.oy, static_cast<int>(kC - R)), y1 = std::min(x.s.oy + x.s.h, static_cast<int>(kC + R) + 1);
+    for (int y = y0; y < y1; y++) {
+      uint16_t* row = gfx::rowAt(x.s, y);
+      const float dy = y + 0.5f - kC;
+      for (int px = 0; px < kSize; px++) {
+        const float dx = px + 0.5f - kC;
+        const float d2 = (dx * dx + dy * dy) * inv;
+        if (d2 >= 255) continue;
+        const int a = alpha[static_cast<int>(d2)];
+        if (a == 0) continue;
+        row[px] = gfx::pack(gfx::mix(gfx::unpack(row[px]), white, a / 255.0f));
+      }
+    }
+  }
+}
+
+/** Connected and standby share a layout per theme; `connected` adds the status line. */
+void idleScreen(Ctx& x, bool connected) {
+  const Frame& f = x.f;
+  const Theme theme = drawnTheme(f);
+  const Str sub = connected ? Str::ConnectedSub : Str::Bye;
+  const uint32_t clockCol = connected ? col::white : rgb(0xD8, 0xD8, 0xDC);
+  switch (theme) {
+    case Theme::Aurora:
+      auroraBackground(x, connected ? 1.0f : 0.6f);
+      momentOverlay(x);
+      if (connected) statusLine(x, 140, accentOf(theme));
+      if (f.hasClock) clockText(x, 270, clockCol);
+      text(x, Font::Body, subLine(f, sub), kC, 318, col::text2);
+      break;
+    case Theme::Orbit:
+      momentOverlay(x);
+      orbitDial(x, 1.0f, true);
+      // Over the hands, on a dark pill: a watch's hands may cross the texts, never hide them.
+      if (connected) {
+        footPill(x, 146, tr(f.lang, Str::Connected), accentOf(theme), 1.0f, 0.94f);
+      }
+      footPill(x, 330, subLine(f, sub), col::text2, 1.0f, 0.94f);
+      break;
+    case Theme::Retro:
+      retroBackground(x, connected ? 1.0f : 0.65f);
+      momentOverlay(x);
+      if (connected) statusLine(x, 92, accentOf(theme));
+      if (f.hasClock) clockText(x, 196, connected ? rgb(0x8C, 0xF6, 0xFF) : rgb(0x6A, 0xC8, 0xD8));
+      footPill(x, 410, subLine(f, sub), col::white);
+      break;
+    case Theme::Chrono:
+      chronoIdle(x, 1.0f);
+      momentOverlay(x);
+      chronoHands(x, 1.0f);
+      break;
+    case Theme::Stopwatch:
+      stopwatchDial(x, 1.0f);
+      momentOverlay(x);
+      stopwatchHands(x, 1.0f);
+      break;
+    case Theme::Photo:
+      photoBackground(x, connected ? 1.0f : 0.7f);
+      momentOverlay(x);
+      if (connected) statusLine(x, 140, col::white, true);
+      if (f.hasClock) {
+        char buf[8];
+        snprintf(buf, sizeof(buf), "%02d:%02d", f.clock.hour, f.clock.minute);
+        shadowText(x, Font::Clock, buf, kC, 270, clockColour(f, col::white));
+      }
+      shadowText(x, Font::Body, subLine(f, sub), kC, 318, rgb(0xE6, 0xE6, 0xEA));
+      break;
+    default:
+      quietRing(x);
+      momentOverlay(x);
+      if (connected) {
+        statusLine(x, 140, col::green);
+        if (f.hasClock) {
+          clockText(x, 270, clockCol);
+        } else {
+          gfx::fillCircle(x.s, kC, 220, 40, col::green);
+          icons::check(x.s, kC, 220, 22, 7.0f, col::black);
+        }
+        text(x, Font::Body, subLine(f, sub), kC, 318, col::text2);
+      } else {
+        if (f.hasClock) clockText(x, 262, clockCol);
+        text(x, Font::Body, subLine(f, sub), kC, 312, col::text2);
+      }
+      break;
+  }
+}
+
+void connectedScreen(Ctx& x) { idleScreen(x, true); }
+
+void standbyScreen(Ctx& x) { idleScreen(x, false); }
+
+/** Getting into the car: a greeting by the time of day (and name), in the theme's look. */
+void welcomeScreen(Ctx& x) {
+  const Frame& f = x.f;
+  const Theme theme = drawnTheme(f);
+  const uint32_t accent = accentOf(theme);
+  const float a = f.screenAge;
+  const float intro = easeOut(a / 1.1f);
+
+  float base = 0;  // shifts the text block per theme
+  switch (theme) {
+    case Theme::Aurora:
+      auroraBackground(x, intro);
+      break;
+    case Theme::Orbit:
+      orbitDial(x, intro, false);
+      break;
+    case Theme::Retro:
+      retroBackground(x, intro, 352);
+      base = -78;
+      break;
+    case Theme::Photo:
+      photoBackground(x, intro);
+      break;
+    case Theme::Chrono:
+      chronoDial(x, intro, false);
+      chronoHands(x, intro, clamp01((a - 0.2f) / 1.3f));
+      break;
+    case Theme::Stopwatch:
+      stopwatchDial(x, intro);
+      stopwatchHands(x, intro, clamp01((a - 0.2f) / 1.3f));
+      break;
+    default: {
+      // The ring sweeps round in green, then settles to the quiet one.
+      quietRing(x);
+      const float sweep = easeOut(a / 0.9f);
+      const float fadeRing = 1 - clamp01((a - 1.4f) / 0.8f);
+      if (sweep > 0.01f && fadeRing > 0) {
+        gfx::ringArc(x.s, kC, kC, kRingR, kRingW, kA0, kA0 + kSweep * sweep, gfx::mix(col::black, accent, 0.3f), accent,
+                     fadeRing);
+      }
+      break;
+    }
+  }
+  momentOverlay(x);
+
+  int hour = f.hasClock ? f.clock.hour : 12;
+  const Str greet = hour >= 4 && hour < 11 ? Str::GoodMorning : hour >= 11 && hour < 18 ? Str::GoodDay : Str::GoodEvening;
+  const bool photo = theme == Theme::Photo;
+  auto draw = [&](Font font, const char* s, float y, uint32_t c, float delay) {
+    const float t = clamp01((a - delay) / 0.45f);
+    if (t <= 0) return;
+    const float yy = y + (1 - easeOut(t)) * 14;
+    if (photo) {
+      shadowText(x, font, s, kC, yy, c, t);
+    } else {
+      text(x, font, s, kC, yy, c, textdatum_t::baseline_center, t);
+    }
+  };
+
+  if (f.hasClock && theme != Theme::Retro && theme != Theme::Chrono && theme != Theme::Stopwatch) {
+    char clock[8];
+    snprintf(clock, sizeof(clock), "%02d:%02d", f.clock.hour, f.clock.minute);
+    draw(Font::NumSm, clock, 132, photo ? col::white : col::text2, 0.1f);
+  }
+  char line[48];
+  if (theme == Theme::Stopwatch) {
+    // Inside the black centre, over the hands.
+    gfx::fillCircle(x.s, kC, kC + 6, 92, stopwatch::centre, 0.85f * clamp01((a - 0.9f) / 0.4f));
+    draw(Font::Title, tr(f.lang, greet), f.name[0] ? 222 : 240, col::white, 1.0f);
+    if (f.name[0]) {
+      char name[32];
+      fit(x, Font::Title, f.name, 180, name, sizeof(name));
+      draw(Font::Title, name, 258, accent, 1.15f);
+    }
+    draw(Font::Small, tr(f.lang, Str::HaveAGoodDrive), f.name[0] ? 290 : 274, col::text2, 1.3f);
+    return;
+  }
+  if (theme == Theme::Chrono) {
+    // A window in the lower half of the dial, like a date window: the greeting sits on its own
+    // black plate between the 40 and the 20, so the sweeping hands pass under it, not through it
+    // (0.2.12; before, the hands crossed the big letters).
+    const bool named = f.name[0] != 0;
+    const float top = named ? 252 : 262, h = named ? 108 : 92, w = 248;
+    const float plate = clamp01((a - 0.15f) / 0.4f);
+    if (plate > 0) {
+      gfx::fillRoundRect(x.s, kC - w / 2, top, w, h, 22, chrono::dial, plate);
+      gfx::strokeRoundRect(x.s, kC - w / 2, top, w, h, 22, 2, chrono::bezel, plate);
+    }
+    if (named) {
+      snprintf(line, sizeof(line), "%s,", tr(f.lang, greet));
+      draw(Font::Title, line, 286, chrono::lume, 0.25f);
+      char name[32];
+      fit(x, Font::Title, f.name, 220, name, sizeof(name));
+      draw(Font::Title, name, 318, chrono::red, 0.45f);
+      draw(Font::Small, tr(f.lang, Str::HaveAGoodDrive), 346, chrono::track, 0.7f);
+    } else {
+      draw(Font::Title, tr(f.lang, greet), 298, chrono::lume, 0.25f);
+      draw(Font::Small, tr(f.lang, Str::HaveAGoodDrive), 332, chrono::track, 0.7f);
+    }
+    return;
+  }
+  if (f.name[0] != 0) {
+    snprintf(line, sizeof(line), "%s,", tr(f.lang, greet));
+    draw(Font::Hero, line, 232 + base, col::white, 0.25f);
+    char name[32];
+    fit(x, Font::Hero, f.name, 340, name, sizeof(name));
+    draw(Font::Hero, name, 284 + base, accent, 0.45f);
+  } else {
+    draw(Font::Hero, tr(f.lang, greet), 258 + base, col::white, 0.25f);
+  }
+  const float subY = theme == Theme::Retro ? 0 : (f.name[0] != 0 ? 338 : 310);
+  if (theme == Theme::Retro) {
+    const float t = clamp01((a - 0.7f) / 0.45f);
+    if (t > 0) footPill(x, 418, tr(f.lang, Str::HaveAGoodDrive), col::white, t);
+  } else {
+    draw(Font::Body, tr(f.lang, Str::HaveAGoodDrive), subY, photo ? rgb(0xE6, 0xE6, 0xEA) : col::text2, 0.7f);
+  }
+}
+
+// --- Surprises over the screen ---------------------------------------------------------------
+
+/** Light speed: the glass goes dark, stars streak out of the middle. */
+void warpOverlay(Ctx& x) {
+  const Frame& f = x.f;
+  const float a = f.eggAge;
+  const float in = clamp01(a / 0.5f), out = clamp01((5.2f - a) / 0.6f);
+  const float k = in * out;
+  gfx::darken(x.s, 0, 0, kSize, kSize, 1 - 0.9f * k);
+  const float speed = 0.25f + 1.6f * easeOut(clamp01(a / 2.2f));
+  for (int i = 0; i < 90; i++) {
+    const float ang = rnd(i * 2 + 1) * 360 * kDeg;
+    const float ph = std::fmod(rnd(i * 2 + 2) + a * speed * (0.6f + rnd(i) * 0.8f), 1.0f);
+    const float r0 = 12 + ph * ph * 250;
+    const float len = 6 + ph * ph * 90 * speed;
+    const float sn = std::sin(ang), cs = -std::cos(ang);
+    const float y0 = kC + cs * r0, y1 = kC + cs * (r0 + len);
+    if (!gfx::rowsIn(x.s, std::min(y0, y1) - 2, std::max(y0, y1) + 2)) continue;
+    const uint32_t c = gfx::mix(rgb(0x9C, 0xC8, 0xFF), col::white, ph);
+    gfx::line(x.s, kC + sn * r0, y0, kC + sn * (r0 + len), y1, 1.2f + ph * 1.8f, c, clamp01(ph * 2.5f) * k);
+  }
+  const float ta = clamp01((a - 0.9f) / 0.5f) * out;
+  if (ta > 0) {
+    text(x, Font::Title, tr(f.lang, Str::Warp), kC, 246, col::white, textdatum_t::baseline_center, ta);
+    text(x, Font::Small, tr(f.lang, Str::WarpSub), kC, 280, rgb(0x9C, 0xC8, 0xFF), textdatum_t::baseline_center, ta);
+  }
+}
+
+/** 88 mph: lightning round the rim, a blue glow, and the time jump named at the foot. */
+void timeTravelOverlay(Ctx& x) {
+  const Frame& f = x.f;
+  const float a = f.eggAge;
+  const float k = clamp01(a / 0.2f) * clamp01((4.2f - a) / 0.5f);
+  // Lightning: jagged lines from the rim inwards, a new set every 90 ms.
+  const int round = static_cast<int>(a / 0.09f);
+  for (int b = 0; b < 3; b++) {
+    if (rnd(round * 11 + b) < 0.35f) continue;
+    const float ang = rnd(round * 11 + b + 5) * 360;
+    float pts[16];
+    float r = 230;
+    for (int p = 0; p < 8; p++) {
+      const float aa = (ang + (rnd(round * 31 + b * 8 + p) - 0.5f) * 10) * kDeg;
+      pts[p * 2] = kC + std::sin(aa) * r;
+      pts[p * 2 + 1] = kC - std::cos(aa) * r;
+      r -= 9 + rnd(round * 17 + p) * 7;
+    }
+    gfx::polyline(x.s, pts, 8, 5.0f, rgb(0x4A, 0x8C, 0xFF), 0.35f * k);
+    gfx::polyline(x.s, pts, 8, 1.8f, col::white, k);
+  }
+  const int tw = width(x, Font::Small, tr(f.lang, Str::TimeTravel));
+  const float w = tw + 30.0f;
+  gfx::fillRoundRect(x.s, kC - w / 2, 428 - 16, w, 32, 16, rgb(0x0A, 0x2A, 0x6A), 0.9f * k);
+  text(x, Font::Small, tr(f.lang, Str::TimeTravel), kC, 428 + capHeight(Font::Small) / 2, col::white,
+       textdatum_t::baseline_center, k);
+}
+
+/** 42 km/h: the answer, with a few sparks. */
+void answerOverlay(Ctx& x) {
+  const Frame& f = x.f;
+  const float a = f.eggAge;
+  const float k = clamp01(a / 0.3f) * clamp01((4.5f - a) / 0.5f);
+  for (int i = 0; i < 12; i++) {
+    const float ph = std::fmod(a * 0.5f + rnd(i * 3 + 1), 1.0f);
+    const float ang = rnd(i * 3 + 2) * 360 * kDeg;
+    const float r = 60 + ph * 70;
+    gfx::fillCircle(x.s, kC + std::sin(ang) * r, 220 - std::cos(ang) * r * 0.7f, 2.2f, col::amber, (1 - ph) * k);
+  }
+  const char* label = tr(f.lang, Str::Answer);
+  const int tw = width(x, Font::Small, label);
+  const float w = tw + 30.0f;
+  gfx::fillRoundRect(x.s, kC - w / 2, 428 - 16, w, 32, 16, rgb(0x3A, 0x2E, 0x04), 0.92f * k);
+  text(x, Font::Small, label, kC, 428 + capHeight(Font::Small) / 2, col::amber, textdatum_t::baseline_center, k);
+}
+
+/** Seconds with one decimal, the decimal sign of the language: "4,3 s" / "4.3 s". */
+void seconds(char* out, size_t cap, float s, Lang lang) {
+  const int tenths = static_cast<int>(s * 10 + 0.5f);
+  snprintf(out, cap, lang == Lang::En ? "%d.%d s" : "%d,%d s", tenths / 10, tenths % 10);
+}
+
+/**
+ * 0–100 km/h: while a launch runs, its time ticks at the foot of the glass; at 100 the result
+ * stays there a few seconds, with a flash round the rim (gold for a new best).
+ */
+void launchOverlay(Ctx& x) {
+  const Frame& f = x.f;
+  constexpr float cy = 402, h = 52;  // in place of the chip below the card
+  char time[16];
+  if (f.launchMs > 0) {
+    const float a = f.launchAge;
+    const uint32_t accent = f.launchBest ? rgb(0xFF, 0xC8, 0x2E) : col::green;
+    // The flash: the whole rim lights up and fades.
+    const float flash = 1 - clamp01(a / 1.2f);
+    if (flash > 0) gfx::strokeCircle(x.s, kC, kC, 226, 10, accent, flash * 0.9f);
+    const float k = clamp01(a / 0.25f) * clamp01((App::kRunShowMs / 1000.0f - a) / 0.5f);
+    seconds(time, sizeof(time), f.launchMs / 1000.0f, f.lang);
+    const char* label = tr(f.lang, f.launchBest ? Str::NewBest : Str::ZeroToHundred);
+    const float w = std::max(width(x, Font::Title, time), width(x, Font::Small, label)) + 40.0f;
+    gfx::fillRoundRect(x.s, kC - w / 2, cy - h / 2, w, h, 18, rgb(0x10, 0x10, 0x12), 0.94f * k);
+    gfx::strokeRoundRect(x.s, kC - w / 2, cy - h / 2, w, h, 18, 1.5f, accent, k);
+    text(x, Font::Small, label, kC, cy - 6, accent, textdatum_t::baseline_center, k);
+    text(x, Font::Title, time, kC, cy + 20, col::white, textdatum_t::baseline_center, k);
+    return;
+  }
+  if (f.launchLive >= 0) {
+    seconds(time, sizeof(time), f.launchLive, f.lang);
+    const char* label = tr(f.lang, Str::ZeroToHundred);
+    const float w = std::max(width(x, Font::Title, time), width(x, Font::Small, label)) + 40.0f;
+    gfx::fillRoundRect(x.s, kC - w / 2, cy - h / 2, w, h, 18, rgb(0x10, 0x10, 0x12), 0.94f);
+    // How far to 100, along the pill's lower edge.
+    const float p = clamp01(f.speed / 100.0f);
+    gfx::fillRoundRect(x.s, kC - w / 2 + 10, cy + h / 2 - 5, (w - 20) * p, 3, 1.5f, col::green);
+    text(x, Font::Small, label, kC, cy - 6, col::text2);
+    text(x, Font::Title, time, kC, cy + 20, col::white);
+  }
+}
+
+void eggOverlay(Ctx& x) {
+  switch (x.f.egg) {
+    case Egg::Warp:
+      warpOverlay(x);
+      break;
+    case Egg::TimeTravel:
+      if (x.f.screen == Screen::Drive) timeTravelOverlay(x);
+      break;
+    case Egg::Answer:
+      if (x.f.screen == Screen::Drive) answerOverlay(x);
+      break;
+    default:
+      break;
+  }
 }
 
 void bootScreen(Ctx& x) {
@@ -980,11 +1954,285 @@ void toastOverlay(Ctx& x) {
        f.toast);
 }
 
+// --- The iPhone's notifications (0.2.11) -------------------------------------------------------
+
+/** Seconds the full notification shows the icon alone before the rest comes in. */
+constexpr float kNoticeIconOnly = 0.9f;
+
+float easeInOut(float t) {
+  t = clamp01(t);
+  return t < 0.5f ? 4 * t * t * t : 1 - std::pow(-2 * t + 2, 3.0f) / 2;
+}
+
+/** A colour for an app without an icon (yet): the same app always gets the same one. */
+uint32_t appColour(const char* app) {
+  static constexpr uint32_t kColours[] = {rgb(0x0A, 0x84, 0xFF), rgb(0x5E, 0x5C, 0xE6), rgb(0xFF, 0x9F, 0x0A),
+                                          rgb(0xFF, 0x37, 0x5F), rgb(0x30, 0xB0, 0xC7), rgb(0xBF, 0x5A, 0xF2),
+                                          rgb(0x34, 0xC7, 0x59)};
+  uint32_t h = 2166136261u;
+  for (const char* p = app; p != nullptr && *p != 0; p++) h = (h ^ static_cast<uint8_t>(*p)) * 16777619u;
+  return kColours[h % (sizeof(kColours) / sizeof(kColours[0]))];
+}
+
+/** Coverage (0..1) of a rounded square of half side `half` and corner radius r at (dx, dy) from its centre. */
+inline float squircleCover(float dx, float dy, float half, float r) {
+  const float qx = gfx::fabsf_(dx) - (half - r), qy = gfx::fabsf_(dy) - (half - r);
+  const float ox = gfx::fmaxf_(qx, 0), oy = gfx::fmaxf_(qy, 0);
+  const float d = std::sqrt(ox * ox + oy * oy) + gfx::fminf_(gfx::fmaxf_(qx, qy), 0) - r;
+  return clamp01(0.5f - d);
+}
+
+/**
+ * The app's icon as iOS shows it: the square artwork with continuous-looking round corners, `size`
+ * pixels wide around (cx, cy). Without an icon: a rounded square in the app's colour with a glyph.
+ */
+void appIcon(Ctx& x, const Frame& f, float cx, float cy, float size, float alpha) {
+  const Frame::Notice& n = f.notice;
+  const float half = size / 2, r = size * 0.2237f;
+  if (!gfx::rowsIn(x.s, cy - half - 1, cy + half + 1) || alpha <= 0.003f) return;
+  const AppIcon* icon = f.noticeIcon;
+  if (icon == nullptr || icon->px == nullptr) {
+    const uint32_t c = n.call || n.missed ? col::green : appColour(n.app);
+    gfx::fillRoundRect(x.s, cx - half, cy - half, size, size, r, c, alpha);
+    if (n.call || n.missed) {
+      icons::glyph(x.s, glyphs::kCall, cx, cy, size * 0.62f, col::white, alpha);
+    } else {
+      // The app's first letter.
+      char letter[5] = {0};
+      const char* name = n.appName[0] != 0 ? n.appName : n.title;
+      const char* p = name;
+      if (vlw(Font::Hero).loaded() && *p != 0) {
+        const char* start = p;
+        nextCodePoint(p);
+        const size_t len = static_cast<size_t>(p - start) < sizeof(letter) - 1 ? p - start : sizeof(letter) - 1;
+        memcpy(letter, start, len);
+        if (letter[0] >= 'a' && letter[0] <= 'z') letter[0] = static_cast<char>(letter[0] - 32);
+      }
+      const Font font = size >= 80 ? Font::Hero : Font::Small;
+      text(x, font, letter, cx, cy + capHeight(font) / 2, col::white, textdatum_t::baseline_center, alpha);
+    }
+    return;
+  }
+  constexpr int kN = AppIcon::kSize;
+  const float step = kN / size;  // source pixels per glass pixel
+  const int y0 = std::max(gfx::ifloor(cy - half), x.s.oy), y1 = std::min(gfx::iceil(cy + half), x.s.oy + x.s.h);
+  const int x0 = std::max(gfx::ifloor(cx - half), 0), x1 = std::min(gfx::iceil(cx + half), kSize);
+  const int box = step >= 2 ? gfx::iround(step) : 1;  // small: average a box of source pixels
+  for (int y = y0; y < y1; y++) {
+    uint16_t* row = gfx::rowAt(x.s, y);
+    const float py = y + 0.5f - cy;
+    const float sy = (py + half) * step - 0.5f;
+    for (int px = x0; px < x1; px++) {
+      const float dx = px + 0.5f - cx;
+      const float cover = squircleCover(dx, py, half, r) * alpha;
+      if (cover <= 0.004f) continue;
+      const float sx = (dx + half) * step - 0.5f;
+      uint32_t rr = 0, gg = 0, bb = 0;
+      if (box > 1) {
+        const int bx = std::min(std::max(gfx::iround(sx - box / 2.0f + 0.5f), 0), kN - box);
+        const int by = std::min(std::max(gfx::iround(sy - box / 2.0f + 0.5f), 0), kN - box);
+        for (int j = 0; j < box; j++) {
+          const uint16_t* src = icon->px + (by + j) * kN + bx;
+          for (int i = 0; i < box; i++) {
+            const uint32_t c = gfx::unpack(src[i]);
+            rr += c >> 16;
+            gg += (c >> 8) & 0xFF;
+            bb += c & 0xFF;
+          }
+        }
+        const uint32_t k = static_cast<uint32_t>(box * box);
+        rr /= k;
+        gg /= k;
+        bb /= k;
+      } else {
+        // Bilinear.
+        const float fx = gfx::fminf_(gfx::fmaxf_(sx, 0), kN - 1.001f), fy = gfx::fminf_(gfx::fmaxf_(sy, 0), kN - 1.001f);
+        const int ix = static_cast<int>(fx), iy = static_cast<int>(fy);
+        const float tx = fx - ix, ty = fy - iy;
+        const uint16_t* a = icon->px + iy * kN + ix;
+        const uint32_t c00 = gfx::unpack(a[0]), c10 = gfx::unpack(a[1]), c01 = gfx::unpack(a[kN]),
+                       c11 = gfx::unpack(a[kN + 1]);
+        auto ch = [&](int shift) {
+          const float v00 = (c00 >> shift) & 0xFF, v10 = (c10 >> shift) & 0xFF, v01 = (c01 >> shift) & 0xFF,
+                      v11 = (c11 >> shift) & 0xFF;
+          return static_cast<uint32_t>((v00 * (1 - tx) + v10 * tx) * (1 - ty) + (v01 * (1 - tx) + v11 * tx) * ty + 0.5f);
+        };
+        rr = ch(16);
+        gg = ch(8);
+        bb = ch(0);
+      }
+      const uint32_t c = gfx::shade(x.s, rgb(static_cast<uint8_t>(rr), static_cast<uint8_t>(gg), static_cast<uint8_t>(bb)));
+      if (cover >= 0.996f) {
+        row[px] = gfx::pack(c);
+      } else {
+        gfx::blendPixel(x.s, px, y, c, static_cast<int>(cover * 255 + 0.5f));
+      }
+    }
+  }
+}
+
+/** Breaks `src` into at most `maxLines` lines no wider than widths[i]; the last one ends in "…" if cut. */
+int wrapLines(Ctx& x, Font font, const char* src, const float* widths, int maxLines, char (*out)[96]) {
+  int lines = 0;
+  const char* p = src;
+  while (*p == ' ') p++;
+  while (*p != 0 && lines < maxLines) {
+    // Take words while they fit.
+    size_t best = 0;
+    size_t i = 0;
+    char buf[96];
+    for (;;) {
+      size_t j = i;
+      while (p[j] != 0 && p[j] != ' ') j++;
+      if (j >= sizeof(buf)) break;
+      memcpy(buf, p, j);
+      buf[j] = 0;
+      if (width(x, font, buf) > widths[lines]) break;
+      best = j;
+      if (p[j] == 0) break;
+      i = j + 1;
+    }
+    const bool last = lines == maxLines - 1;
+    if (best == 0 || (last && p[best] != 0)) {
+      // A word longer than the line, or the last line with more to come: cut with an ellipsis.
+      fit(x, font, p, widths[lines], out[lines], sizeof(out[0]));
+      if (last && p[best] != 0 && best > 0) {
+        char rest[200];
+        snprintf(rest, sizeof(rest), "%.*s …", static_cast<int>(best), p);
+        if (width(x, font, rest) <= widths[lines]) snprintf(out[lines], sizeof(out[0]), "%s", rest);
+      }
+      lines++;
+      if (best == 0) break;
+      p += best;
+    } else {
+      memcpy(out[lines], p, best);
+      out[lines][best] = 0;
+      lines++;
+      p += best;
+    }
+    while (*p == ' ') p++;
+  }
+  return lines;
+}
+
+/** Half the width of the glass at height y, minus a margin. */
+float chordHalf(float y, float margin) {
+  const float dy = y - kC;
+  const float r = kC - margin;
+  return dy * dy >= r * r ? 0 : std::sqrt(r * r - dy * dy);
+}
+
+/**
+ * Over the whole glass, the way the iPhone's StandBy does it: first only the app's icon, large in
+ * the middle; then it shrinks up to the top and the sender and the text come in under it. A call
+ * gets its two buttons.
+ */
+void noticeFull(Ctx& x) {
+  const Frame::Notice& n = x.f.notice;
+  const float in = easeOut(n.age / 0.28f);
+  const float a = in * (1 - n.out);
+  // Black behind it, as StandBy; a drive's map stays faintly there.
+  gfx::darken(x.s, 0, 0, kSize, kSize, 1.0f - (x.f.screen == Screen::Drive && !n.call ? 0.8f : 0.94f) * a);
+  if (a <= 0.003f) return;
+
+  const bool call = n.call;
+  // The icon alone: springs up from small, large in the middle ...
+  const float pop = 0.55f + 0.45f * easeOutBack(n.age / 0.5f);
+  const float bigSize = 192.0f * pop, bigCy = kC - 8;
+  // ... then moves up and shrinks; the rest follows it in.
+  const float m = n.age < kNoticeIconOnly ? 0 : easeInOut((n.age - kNoticeIconOnly) / 0.5f);
+  const float smallSize = call ? 96.0f : 104.0f, smallCy = call ? 112.0f : 118.0f;
+  const float iconSize = bigSize + (smallSize - bigSize) * m;
+  const float iconCy = bigCy + (smallCy - bigCy) * m;
+  appIcon(x, x.f, kC, iconCy, iconSize, a);
+
+  // The app's name under the icon, wherever the icon is.
+  char line[96];
+  float y = iconCy + iconSize / 2 + 30;
+  fit(x, Font::Small, n.appName, chordHalf(y, 40) * 2, line, sizeof(line));
+  text(x, Font::Small, line, kC, y, col::text2, textdatum_t::baseline_center, a);
+
+  const float rest = easeOut((n.age - kNoticeIconOnly - 0.4f) / 0.35f);  // once the icon is up
+  const float ra = a * rest;
+  if (ra <= 0.003f) return;
+  const float lift = (1 - rest) * 14;
+
+  // The sender, large for a call.
+  y = smallCy + smallSize / 2 + 30 + (call ? 52 : 38) + lift;
+  Font titleFont = call ? Font::Hero : Font::Title;
+  if (width(x, titleFont, n.title) > chordHalf(y, 44) * 2) titleFont = Font::Title;
+  fit(x, titleFont, n.title, chordHalf(y, 44) * 2, line, sizeof(line));
+  text(x, titleFont, line, kC, y, col::white, textdatum_t::baseline_center, ra);
+
+  if (call) {
+    // Decline left, accept right; the accept button rings.
+    const float by = kCallButtonY + lift;
+    const float ring = std::fmod(n.age, 1.4f) / 1.4f;
+    gfx::strokeCircle(x.s, kC + kCallButtonDx, by, kCallButtonR + 4 + 16 * ring, 3, col::green,
+                      a * (1 - ring) * 0.7f);
+    gfx::fillCircle(x.s, kC - kCallButtonDx, by, kCallButtonR, col::red, ra);
+    gfx::fillCircle(x.s, kC + kCallButtonDx, by, kCallButtonR, col::green, ra);
+    icons::glyph(x.s, glyphs::kCallEnd, kC - kCallButtonDx, by, 44, col::white, ra);
+    icons::glyph(x.s, glyphs::kCall, kC + kCallButtonDx, by, 40, col::white, ra);
+    const float ly = by + kCallButtonR + 22;
+    fit(x, Font::Small, n.negative, 110, line, sizeof(line));
+    text(x, Font::Small, line, kC - kCallButtonDx, ly, col::text2, textdatum_t::baseline_center, ra);
+    fit(x, Font::Small, n.positive, 110, line, sizeof(line));
+    text(x, Font::Small, line, kC + kCallButtonDx, ly, col::text2, textdatum_t::baseline_center, ra);
+    return;
+  }
+
+  if (n.body[0] != 0) {
+    char lines[3][96];
+    float widths[3];
+    const float first = y + 34;  // (lift is in y already)
+    for (int i = 0; i < 3; i++) widths[i] = chordHalf(first + i * 28 + 6, 40) * 2;
+    const int count = wrapLines(x, Font::Body, n.body, widths, 3, lines);
+    for (int i = 0; i < count; i++) {
+      text(x, Font::Body, lines[i], kC, first + i * 28, rgb(0xD1, 0xD1, 0xD6), textdatum_t::baseline_center, ra);
+    }
+  }
+  if (n.waiting > 0) {
+    char more[8];
+    snprintf(more, sizeof(more), "+%d", n.waiting);
+    chip(x, 428, more, col::text2, 0, nullptr, ra);
+  }
+  // Its time runs down round the rim.
+  if (n.left > 0.003f) gfx::arc(x.s, kC, kC, 229, 3, 0.0f, 360.0f * n.left, col::tick, col::tick, ra);
+}
+
+/** While driving: a pill low on the glass, the icon small, app and sender — the speed stays. */
+void noticeCompact(Ctx& x) {
+  const Frame::Notice& n = x.f.notice;
+  const float in = easeOut(n.age / 0.3f);
+  const float a = in * (1 - n.out);
+  if (a <= 0.003f) return;
+  const float cy = (x.mapReady ? 176.0f : kChipCy) + (1 - in) * 14;
+  const float h = 50, iconSize = 34;
+  char app[64], title[96];
+  const float textMax = 196;
+  fit(x, Font::Tiny, n.appName, textMax, app, sizeof(app));
+  fit(x, Font::Small, n.title, textMax, title, sizeof(title));
+  const float tw = std::max(width(x, Font::Tiny, app), width(x, Font::Small, title));
+  const float w = 8 + iconSize + 10 + tw + 18;
+  const float x0 = kC - w / 2;
+  if (!gfx::rowsIn(x.s, cy - h / 2 - 1, cy + h / 2 + 1)) return;
+  gfx::fillRoundRect(x.s, x0, cy - h / 2, w, h, h / 2, rgb(0x22, 0x22, 0x25), a);
+  appIcon(x, x.f, x0 + 8 + iconSize / 2, cy, iconSize, a);
+  const float tx = x0 + 8 + iconSize + 10;
+  text(x, Font::Tiny, app, tx, cy - 6, col::text2, textdatum_t::baseline_left, a);
+  text(x, Font::Small, title, tx, cy + 15, col::white, textdatum_t::baseline_left, a);
+}
+
 /** Everything of one frame that falls into the band x.s. */
 void renderBand(Ctx& x) {
   const Frame& f = x.f;
   // Every screen except the HUD fades in.
-  const float fade = f.screen == Screen::Drive || f.screen == Screen::Boot ? 1.0f : clamp01(f.screenAge / 0.3f);
+  // (The welcome brings its own entry animation.)
+  const float fade = f.screen == Screen::Drive || f.screen == Screen::Boot || f.screen == Screen::Welcome ||
+                             f.screen == Screen::Charging || f.screen == Screen::Intro
+                         ? 1.0f
+                         : clamp01(f.screenAge / 0.3f);
   x.s.dim = fade;
 
   if (f.update.phase != Frame::Update::Phase::None) {
@@ -1015,8 +2263,28 @@ void renderBand(Ctx& x) {
     case Screen::Standby:
       standbyScreen(x);
       break;
+    case Screen::Welcome:
+      welcomeScreen(x);
+      break;
+    case Screen::Charging:
+      chargingScreen(x);
+      break;
+    case Screen::Intro:
+      introScreen(x);
+      break;
+  }
+  // Out of the intro's flash: the white fades off the greeting.
+  if (f.afterIntro && f.screenAge < 0.7f) {
+    gfx::fillRoundRect(x.s, 0, 0, kSize, kSize, 0, col::white, 1 - easeOut(f.screenAge / 0.7f));
   }
   x.s.dim = 1.0f;
+  if (x.f.egg != Egg::None) eggOverlay(x);
+  if (f.screen == Screen::Drive && !f.linkLost && (f.launchMs > 0 || f.launchLive >= 0)) launchOverlay(x);
+  if (f.notice.style == Frame::Notice::Style::Full) {
+    noticeFull(x);
+  } else if (f.notice.style == Frame::Notice::Style::Compact) {
+    noticeCompact(x);
+  }
 
   if (f.resetAsk) {
     resetOverlay(x);

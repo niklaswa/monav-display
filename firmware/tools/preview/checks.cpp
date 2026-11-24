@@ -1,6 +1,7 @@
 // Host checks of the protocol and the app logic (run by tools/preview/render.sh before the
 // previews are drawn). Framing edge cases, parsing, pairing, time sync and the timeouts.
 
+#include <algorithm>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -141,7 +142,7 @@ void parsing() {
   char out[128];
   proto::buildWelcome(out, sizeof(out), "0.1.0", "4F2A", true, 80, Layout::Hud);
   CHECK(std::string(out) ==
-        "{\"t\":\"welcome\",\"fw\":\"0.1.0\",\"proto\":1,\"id\":\"4F2A\",\"fresh\":true,\"bright\":80,\"layout\":\"hud\"}");
+        "{\"t\":\"welcome\",\"fw\":\"0.1.0\",\"proto\":1,\"id\":\"4F2A\",\"fresh\":true,\"bright\":80,\"layout\":\"hud\",\"img\":false}");
   proto::buildDenied(out, sizeof(out), "4F2A");
   CHECK(std::string(out) == "{\"t\":\"denied\",\"id\":\"4F2A\"}");
   proto::buildStatus(out, sizeof(out), 60);
@@ -207,12 +208,181 @@ class TestPlatform : public Platform {
   void authorizationChanged(bool a) override { authorized = a; }
   void pairingChanged(bool p) override { paired = p; }
   void log(const char*) override {}
+  Style style;
+  bool haveStyle = false;
+  bool loadStyle(Style& out) override {
+    if (haveStyle) out = style;
+    return haveStyle;
+  }
+  void saveStyle(const Style& s) override {
+    style = s;
+    haveStyle = true;
+  }
+  uint32_t bestRun = 0;
+  uint32_t loadBestRun() override { return bestRun; }
+  void saveBestRun(uint32_t ms) override { bestRun = ms; }
+  bool noticeLink = false;
+  std::vector<std::pair<uint32_t, bool>> actions;
+  void setNoticeLink(bool on) override { noticeLink = on; }
+  void noticeAction(uint32_t uid, bool positive) override { actions.emplace_back(uid, positive); }
 };
 
 Message parsed(const std::string& json) {
   Message m;
   proto::parse(json.data(), json.size(), m);
   return m;
+}
+
+void launch() {
+  {
+    // Standing a second, then 0 → 100 evenly in 4.3 s, 10 samples a second.
+    LaunchTimer l;
+    int64_t t = 1000;
+    uint32_t got = 0;
+    for (int i = 0; i < 15; i++, t += 100) CHECK(l.sample(t, 0) == 0);
+    CHECK(l.phase() == LaunchTimer::Phase::Standing);
+    const int64_t go = t;
+    for (int i = 1; got == 0 && i < 80; i++) got = l.sample(go + i * 100, std::min(120.0f, i * 100 * 100.0f / 4300.0f));
+    // The last standing sample is 100 ms before go: the run starts as 1 km/h is crossed (86 ms
+    // after it), 100 is reached 4300 ms after go.
+    CHECK(got >= 4300 && got <= 4325);
+  }
+  {
+    // Lifting on the way: no run. Rolling off without a stop first: no run either.
+    LaunchTimer l;
+    int64_t t = 0;
+    for (int i = 0; i < 15; i++, t += 100) l.sample(t, 0);
+    uint32_t got = 0;
+    float v = 0;
+    for (int i = 0; i < 30; i++, t += 100) got |= l.sample(t, v += 3);
+    for (int i = 0; i < 5; i++, t += 100) got |= l.sample(t, v -= 2);
+    for (int i = 0; i < 40; i++, t += 100) got |= l.sample(t, v += 3);
+    CHECK(got == 0);
+    LaunchTimer m;
+    m.sample(0, 0);
+    m.sample(300, 0);
+    got = 0;
+    for (int i = 1; i < 60; i++) got |= m.sample(300 + i * 100, i * 3.0f);
+    CHECK(got == 0);
+  }
+  {
+    // Through the app: cfg turns it on; the run goes to the phone and is the best.
+    TestPlatform p;
+    p.token = "T1";
+    App a(p, "4F2A");
+    uint64_t now = 1000;
+    a.begin(now);
+    a.connected(now);
+    a.message(parsed("{\"t\":\"hello\",\"proto\":1,\"token\":\"T1\",\"now\":5}"), now);
+    a.message(parsed("{\"t\":\"cfg\",\"launch\":true}"), now);
+    int64_t phone = 100000;
+    auto v = [&](float kmh) {
+      char m[96];
+      snprintf(m, sizeof(m), "{\"t\":\"v\",\"now\":%lld,\"kmh\":%.2f}", static_cast<long long>(phone), kmh);
+      a.message(parsed(m), now);
+      a.tick(now);
+      phone += 100;
+      now += 100;
+    };
+    for (int i = 0; i < 15; i++) v(0);
+    for (int i = 1; i <= 52; i++) v(std::min(110.0f, i * 2.0f));
+    CHECK(p.sent.back().rfind("{\"t\":\"run\",\"ms\":", 0) == 0 && p.sent.back().find("\"best\":true") != std::string::npos);
+    CHECK(p.bestRun >= 4940 && p.bestRun <= 4960);
+    Frame f;
+    a.frame(f, now);
+    CHECK(f.launchMs == p.bestRun && f.launchBest);
+  }
+  {
+    // With the intro on, it replaces the traffic light at power-up. Connected while it runs: the
+    // greeting out of its flash, no second jump. Connected soon after: the greeting alone.
+    for (const uint64_t connectAfter : {1000u, 3000u + 5000u}) {
+      TestPlatform p;
+      p.token = "T1";
+      p.haveStyle = true;
+      p.style.intro = true;
+      App a(p, "4F2A");
+      uint64_t now = 1000;
+      a.begin(now);
+      a.tick(now);
+      CHECK(a.screen() == Screen::Intro);
+      now += connectAfter;
+      a.tick(now);
+      a.connected(now);
+      a.message(parsed("{\"t\":\"hello\",\"proto\":1,\"token\":\"T1\",\"now\":5}"), now);
+      a.tick(now);
+      if (connectAfter < App::kIntroMs) {
+        CHECK(a.screen() == Screen::Intro);
+        now = 1000 + App::kIntroMs + 10;
+        a.tick(now);
+        Frame f;
+        a.frame(f, now);
+        CHECK(a.screen() == Screen::Welcome && f.afterIntro);
+      } else {
+        Frame f;
+        a.frame(f, now);
+        CHECK(a.screen() == Screen::Welcome && !f.afterIntro);
+      }
+    }
+    // Without the intro: the traffic light as before.
+    TestPlatform p;
+    App a(p, "4F2A");
+    a.begin(1000);
+    a.tick(1000);
+    CHECK(a.screen() == Screen::Boot);
+  }
+  {
+    // The performance intro: before the greeting when set; driving off ends both.
+    TestPlatform p;
+    p.token = "T1";
+    p.haveStyle = true;
+    p.style.intro = true;
+    App a(p, "4F2A");
+    uint64_t now = 1000;
+    a.begin(now);
+    now += 2000;
+    a.connected(now);
+    a.message(parsed("{\"t\":\"hello\",\"proto\":1,\"token\":\"T1\",\"now\":5}"), now);
+    a.tick(now);
+    CHECK(a.screen() == Screen::Intro);
+    now += App::kIntroMs + 50;
+    a.tick(now);
+    Frame f;
+    a.frame(f, now);
+    CHECK(a.screen() == Screen::Welcome && f.afterIntro);
+    a.message(parsed("{\"t\":\"v\",\"now\":5,\"kmh\":20}"), now);
+    a.tick(now);
+    CHECK(a.screen() == Screen::Drive);
+    a.message(parsed("{\"t\":\"cfg\",\"intro\":false}"), now);
+    CHECK(!p.style.intro);
+  }
+  {
+    // Charging: bat brings up the screen, a moving car or silence ends it.
+    TestPlatform p;
+    p.token = "T1";
+    App a(p, "4F2A");
+    uint64_t now = 1000;
+    a.begin(now);
+    a.connected(now);
+    a.message(parsed("{\"t\":\"hello\",\"proto\":1,\"token\":\"T1\",\"now\":5}"), now);
+    now += App::kWelcomeMs + 100;
+    a.message(parsed("{\"t\":\"bat\",\"soc\":64.5,\"kw\":120,\"km\":330}"), now);
+    a.message(parsed("{\"t\":\"v\",\"now\":5,\"kmh\":0}"), now);
+    a.tick(now);
+    CHECK(a.screen() == Screen::Charging);
+    Frame f;
+    a.frame(f, now);
+    CHECK(std::fabs(f.soc - 64.5f) < 0.01f && std::fabs(f.chargeKw - 120) < 0.01f);
+    now += App::kChargeStaleMs + 100;
+    a.message(parsed("{\"t\":\"v\",\"now\":5,\"kmh\":0}"), now);
+    a.tick(now);
+    CHECK(a.screen() == Screen::Drive);
+    a.message(parsed("{\"t\":\"bat\",\"soc\":65}"), now);
+    a.tick(now);
+    CHECK(a.screen() == Screen::Charging);
+    a.message(parsed("{\"t\":\"bat\",\"on\":false}"), now);
+    a.tick(now);
+    CHECK(a.screen() == Screen::Drive);
+  }
 }
 
 void app() {
@@ -259,7 +429,71 @@ void app() {
     a.connected(now);
     a.message(parsed("{\"t\":\"hello\",\"proto\":1,\"token\":\"T1\",\"now\":5}"), now);
     a.tick(now);
+    // Getting in: the greeting first, then connected.
+    CHECK(a.screen() == Screen::Welcome);
+    now += App::kWelcomeMs + 100;
+    a.tick(now);
     CHECK(a.screen() == Screen::Connected);
+  }
+  {
+    // The look: cfg sets theme, name and the surprises, the display keeps them.
+    TestPlatform p;
+    p.token = "T1";
+    App a(p, "4F2A");
+    uint64_t now = 1000;
+    a.begin(now);
+    now += 2000;
+    a.connected(now);
+    a.message(parsed("{\"t\":\"hello\",\"proto\":1,\"token\":\"T1\",\"now\":5}"), now);
+    CHECK(p.sent.back().find("\"img\":false") != std::string::npos);
+    a.message(parsed("{\"t\":\"cfg\",\"theme\":\"retro\",\"name\":\"Ren\xc3\xa9\",\"eggs\":true}"), now);
+    CHECK(p.haveStyle && p.style.theme == Theme::Retro && std::string(p.style.name) == "Ren\xc3\xa9");
+    a.message(parsed("{\"t\":\"cfg\",\"theme\":\"bogus\"}"), now);
+    CHECK(a.style().theme == Theme::Classic && std::string(a.style().name) == "Ren\xc3\xa9");
+    // A name cut in the middle of a character loses the half character.
+    a.message(parsed("{\"t\":\"cfg\",\"name\":\"Aaaaaaaaaaaaaaaaaaaaaa\xc3\xa9\"}"), now);
+    CHECK(std::string(a.style().name) == "Aaaaaaaaaaaaaaaaaaaaaa");
+    // Restarted: the look comes back from storage.
+    App b(p, "4F2A");
+    b.begin(now);
+    CHECK(b.style().theme == Theme::Classic && std::string(b.style().name) == "Aaaaaaaaaaaaaaaaaaaaaa");
+    // Seven quick taps while parked: light speed. Too slow: nothing.
+    now += App::kWelcomeMs + 100;
+    a.tick(now);
+    CHECK(a.screen() == Screen::Connected);
+    for (int i = 0; i < 6; i++) {
+      a.gesture(Gesture{GestureType::Tap}, now);
+      now += 900;
+      a.tick(now);
+    }
+    CHECK(a.egg() == Egg::None);
+    for (int i = 0; i < 7; i++) {
+      a.gesture(Gesture{GestureType::Tap}, now);
+      now += 200;
+      a.tick(now);
+    }
+    CHECK(a.egg() == Egg::Warp);
+    // Off: no surprises.
+    now += 6000;
+    a.tick(now);
+    a.message(parsed("{\"t\":\"cfg\",\"eggs\":false}"), now);
+    for (int i = 0; i < 7; i++) {
+      a.gesture(Gesture{GestureType::Tap}, now);
+      now += 200;
+      a.tick(now);
+    }
+    CHECK(a.egg() == Egg::None);
+    // On again: 88 mph once per drive, 42 km/h held.
+    a.message(parsed("{\"t\":\"cfg\",\"eggs\":true}"), now);
+    a.message(parsed("{\"t\":\"v\",\"now\":5,\"kmh\":141.7}"), now);
+    a.tick(now);
+    CHECK(a.egg() == Egg::TimeTravel);
+    for (int i = 0; i < 60; i++) {
+      now += 100;
+      a.message(parsed("{\"t\":\"v\",\"now\":5,\"kmh\":42.2}"), now);
+      a.tick(now);
+    }
+    CHECK(a.egg() == Egg::Answer);
   }
   {
     // Same phone again: welcome without fresh. Another phone: denied, and ignored.
@@ -579,7 +813,12 @@ void app02() {
     a.frame(f, now);
     CHECK(!f.tilt);
     a.gesture(Gesture{GestureType::Tap}, now);
+    CHECK(a.layout() == Layout::Clock && p.sent.back() == "{\"t\":\"status\",\"layout\":\"clock\"}");
+    a.gesture(Gesture{GestureType::Tap}, now);
     CHECK(a.layout() == Layout::Hud);
+    // The app sets the layout too (its "clock all the time" setting).
+    a.message(parsed("{\"t\":\"cfg\",\"layout\":\"clock\"}"), now);
+    CHECK(a.layout() == Layout::Clock && p.layout == static_cast<int>(Layout::Clock));
     a.disconnected(now);
     CHECK(!p.authorized);
   }
@@ -607,6 +846,135 @@ void app02() {
 #endif
 }
 
+/** ANCS: the wire format and what the app makes of notifications. */
+void notices() {
+  // Notification Source: Added, Important, Social, 1 waiting, uid 0x01020304.
+  const uint8_t src[8] = {0, 2, 4, 1, 4, 3, 2, 1};
+  ancs::SourceEvent ev;
+  CHECK(ancs::parseSource(src, 8, ev));
+  CHECK(ev.event == ancs::EventId::Added && ev.category == ancs::Category::Social && ev.uid == 0x01020304);
+  CHECK(!ancs::parseSource(src, 7, ev));
+
+  uint8_t cmd[32];
+  const size_t n = ancs::buildGetNotification(cmd, sizeof(cmd), 0x01020304);
+  CHECK(n == 17 && cmd[0] == 0 && cmd[1] == 4 && cmd[4] == 1 && cmd[5] == 0);
+  CHECK(ancs::buildAction(cmd, sizeof(cmd), 7, false) == 6 && cmd[0] == 2 && cmd[1] == 7 && cmd[5] == 1);
+
+  // A Data Source answer in two packets: app id, title, subtitle, message (with an emoji, typographic
+  // quotes and a bidi isolate as iOS sends them), action labels.
+  std::vector<uint8_t> answer = {0, 4, 3, 2, 1};
+  auto attr = [&](uint8_t id, const std::string& v) {
+    answer.push_back(id);
+    answer.push_back(static_cast<uint8_t>(v.size()));
+    answer.push_back(static_cast<uint8_t>(v.size() >> 8));
+    answer.insert(answer.end(), v.begin(), v.end());
+  };
+  attr(0, "net.whatsapp.WhatsApp");
+  attr(1, "\xe2\x81\xa8" "Anna\xe2\x81\xa9");
+  attr(2, "");
+  attr(3, "Bin gleich da \xf0\x9f\x9a\x97 \xe2\x80\x9eok\xe2\x80\x9c?\n\nJa");
+  attr(6, "");
+  attr(7, "Clear");
+  ancs::Response r;
+  r.beginNotification(0x01020304);
+  CHECK(r.feed(answer.data(), 20) == ancs::Response::Result::More);
+  CHECK(r.feed(answer.data() + 20, answer.size() - 20) == ancs::Response::Result::Done);
+  CHECK(std::string(r.notice().app) == "net.whatsapp.WhatsApp");
+  CHECK(std::string(r.notice().title) == "Anna");
+  CHECK(std::string(r.notice().message) == "Bin gleich da \xe2\x80\x9eok\xe2\x80\x9c? Ja");
+  CHECK(std::string(r.notice().negative) == "Clear");
+
+  // The app's display name.
+  std::vector<uint8_t> app = {1};
+  const std::string id = "net.whatsapp.WhatsApp";
+  app.insert(app.end(), id.begin(), id.end());
+  app.push_back(0);
+  app.push_back(0);
+  app.push_back(8);
+  app.push_back(0);
+  const std::string name = "WhatsApp";
+  app.insert(app.end(), name.begin(), name.end());
+  r.beginApp(id.c_str());
+  CHECK(r.feed(app.data(), app.size()) == ancs::Response::Result::Done && std::string(r.appName()) == "WhatsApp");
+
+  // Text cut at the end never splits a character.
+  char small[6];
+  ancs::cleanText("abcd\xc3\xa4\xc3\xb6", 8, small, sizeof(small));
+  CHECK(std::string(small) == "abcd");
+
+  // cfg.ntf / ntfText / ntfFull.
+  Message m = parsed("{\"t\":\"cfg\",\"ntf\":\"calls\",\"ntfText\":true,\"ntfFull\":true}");
+  CHECK(m.hasNotices && m.notices == NoticeMode::Calls && m.hasNoticeText && m.noticeText && m.hasNoticeFull);
+  m = parsed("{\"t\":\"icon\",\"op\":\"begin\",\"id\":5,\"size\":900,\"w\":192,\"h\":192,\"app\":\"a.b\"}");
+  CHECK(m.type == MsgType::Icon && m.op == TransferOp::Begin && std::string(m.app) == "a.b" && m.w == 192);
+
+  // The app: link only while welcomed and wanted; calls only; the queue; a call first; accept on the glass.
+  TestPlatform p;
+  p.token = "tok";
+  App a(p, "4F2A");
+  uint64_t now = 1000;
+  a.begin(now);
+  a.connected(now);
+  a.message(parsed("{\"t\":\"hello\",\"proto\":1,\"token\":\"tok\"}"), now);
+  CHECK(!p.noticeLink);
+  a.message(parsed("{\"t\":\"cfg\",\"ntf\":\"calls\"}"), now);
+  CHECK(p.noticeLink);
+  auto notice = [](uint32_t uid, ancs::Category c, const char* app) {
+    ancs::Notice n;
+    n.uid = uid;
+    n.category = c;
+    snprintf(n.app, sizeof(n.app), "%s", app);
+    snprintf(n.title, sizeof(n.title), "T%u", static_cast<unsigned>(uid));
+    return n;
+  };
+  now += 5000;
+  a.tick(now);
+  a.notice(notice(1, ancs::Category::Social, "x.chat"), false, now);
+  CHECK(!a.noticeShowing());  // calls only
+  a.message(parsed("{\"t\":\"cfg\",\"ntf\":\"all\"}"), now);
+  const size_t sentBefore = p.sent.size();
+  a.notice(notice(2, ancs::Category::Social, "x.chat"), false, now);
+  CHECK(a.noticeShowing());
+  CHECK(p.sent.size() == sentBefore + 1 && p.sent.back().find("icon?") != std::string::npos);
+  a.notice(notice(3, ancs::Category::Email, "x.chat"), false, now);  // queued, no second icon request
+  CHECK(p.sent.size() == sentBefore + 1);
+  ancs::Notice pre = notice(4, ancs::Category::Social, "x.chat");
+  pre.flags = ancs::flag::kPreExisting;
+  a.notice(pre, false, now);
+  Frame f;
+  a.frame(f, now);
+  CHECK(f.notice.style == Frame::Notice::Style::Full && std::string(f.notice.title) == "T2" && f.notice.waiting == 1);
+  // A call comes first; tapping its accept button accepts it.
+  a.notice(notice(9, ancs::Category::IncomingCall, "com.apple.mobilephone"), false, now);
+  a.frame(f, now);
+  CHECK(f.notice.call && std::string(f.notice.title) == "T9" && f.notice.waiting == 2);
+  a.gesture(Gesture{GestureType::Tap, 0, static_cast<int>(233 + kCallButtonDx), static_cast<int>(kCallButtonY)}, now);
+  CHECK(p.actions.size() == 1 && p.actions[0].first == 9 && p.actions[0].second);
+  for (int i = 0; i < 20; i++) a.tick(now += 33);
+  a.frame(f, now);
+  CHECK(!f.notice.call && std::string(f.notice.title) == "T2");
+  // Driving: small; with ntfFull large.
+  for (int i = 0; i < 400; i++) a.tick(now += 33);
+  a.message(parsed("{\"t\":\"v\",\"kmh\":80}"), now);
+  for (int i = 0; i < 400; i++) {
+    a.tick(now += 33);
+    if (i % 3 == 0) a.message(parsed("{\"t\":\"v\",\"kmh\":80}"), now);
+  }
+  a.notice(notice(11, ancs::Category::Social, "x.chat"), false, now);
+  a.tick(now += 33);
+  a.frame(f, now);
+  CHECK(f.notice.style == Frame::Notice::Style::Compact);
+  a.noticeRemoved(11, now);
+  for (int i = 0; i < 20; i++) a.tick(now += 33);
+  a.message(parsed("{\"t\":\"cfg\",\"ntfFull\":true}"), now);
+  a.notice(notice(12, ancs::Category::Social, "x.chat"), false, now);
+  a.frame(f, now);
+  CHECK(f.notice.style == Frame::Notice::Style::Full);
+  // Gone with the connection.
+  a.disconnected(now);
+  CHECK(!p.noticeLink);
+}
+
 }  // namespace
 
 int runChecks() {
@@ -619,6 +987,8 @@ int runChecks() {
   mapGeometry();
   app();
   app02();
+  launch();
+  notices();
   printf("Checks: %d passed, %d failed\n", g_passed, g_failed);
   return g_failed;
 }

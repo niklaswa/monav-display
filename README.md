@@ -137,6 +137,8 @@ docs/            the web installer and how it is built
   [SensorLib](https://github.com/lewisxhe/SensorLib) (MIT),
   [BOSL2](https://github.com/BelfrySCAD/BOSL2) for the case (BSD 2-Clause).
 - [Inter](https://rsms.me/inter/) by Rasmus Andersson (SIL OFL 1.1), baked into the firmware's fonts.
+- The phone handsets of a call are [Material Icons](https://github.com/google/material-design-icons)
+  "call" and "call_end" by Google (Apache 2.0), baked by `firmware/scripts/build_glyphs.py`.
 - Sample maps © [OpenStreetMap](https://www.openstreetmap.org/copyright) contributors (ODbL).
 
 ## License
