@@ -1,5 +1,7 @@
 # Monav Display
 
+<p align="center"><img src="docs/images/header.webp" width="100%" alt="The round display on the dashboard at dusk: a watch face greets the driver, then speed, the speed limit and a chat notice as the car drives off"></p>
+
 **A round AMOLED head-up display for the car, driven by your iPhone.**
 
 Speed, the speed limit, speed cameras, traffic-light countdowns, turn-by-turn directions, a moving
