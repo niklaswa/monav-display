@@ -3,7 +3,7 @@
 **A round AMOLED head-up display for the car, driven by your iPhone.**
 
 Speed, the speed limit, speed cameras, traffic-light countdowns, turn-by-turn directions, a moving
-map with the route and live charging stations, on a 1.75″ glass that sits on the air vent. The
+map with the route and live charging stations, on a 1.75″ glass in your line of sight. The
 [Monav](#the-phone-side) app on the phone does the work. The display draws everything itself at up to
 30 fps, counts down on its own and keeps going when the Bluetooth link drops for a moment.
 
@@ -34,7 +34,7 @@ map with the route and live charging stations, on a 1.75″ glass that sits on t
 - **Mount it at any angle**: the picture turns to stand upright, and touch turns with it.
 - **Firmware updates over Bluetooth** from the phone, with a probation period: if a new firmware
   crashes or hangs before it has proven itself, the bootloader goes back to the previous one.
-- **Gestures**: tap to switch layouts (HUD → focus → map), swipe for brightness, hold 3 s to forget the
+- **Gestures**: tap to switch layouts (HUD → focus → map → watch face), swipe for brightness, hold 3 s to forget the
   paired phone.
 - **German and English**, following the app's language or picked in its display settings.
 
@@ -53,8 +53,62 @@ map with the route and live charging stations, on a 1.75″ glass that sits on t
   </tr>
 </table>
 
-All 36 screens are in [`firmware/preview/`](firmware/preview). They are rendered on the Mac by the
+All 82 screens are in [`firmware/preview/`](firmware/preview). They are rendered on the Mac by the
 firmware's own code (see [Previews](firmware/README.md#previews)), so they look exactly like the glass.
+Every design in motion: [`showreel.mp4`](firmware/preview/showreel.mp4), the notifications:
+[`notices.mp4`](firmware/preview/notices.mp4).
+
+### When you're not driving
+
+- **Welcome**: when the phone connects, a greeting for the time of day — by name, if you set one — in
+  the look of the chosen design. Driving off ends it.
+- **Seven designs** for the welcome and the parked screens: *classic*, *aurora* (northern lights),
+  *orbit* (a watch face with a comet for the seconds), *retro* (synthwave sun and grid), *photo*
+  (a picture from your iPhone) and two watch faces, *chrono* and *stopwatch*. The watch faces can
+  stay on during the drive, with the speed, the limit and the next warning inside the dial.
+- **Hyperspace intro**: if you like, the display starts with a jump to hyperspace instead of the
+  traffic light — stars stretch into streaks, a lavender tunnel, a white flash, then the greeting.
+- **Charging**: while the car charges, the ring fills up to the battery level, the percentage counts
+  along, with the charging power and the range below.
+- **0–100 km/h**: with the speed coming from the car, every start from standing is timed. The time
+  ticks on the glass, and a new best gets a gold flash and is kept.
+- **Little surprises**: seven quick taps while parked, 88 mph, 42 km/h held, and a few dates and times.
+
+<table>
+  <tr>
+    <td><img src="firmware/preview/56-welcome-chrono.png" width="200" alt="Chrono watch face with the evening greeting"></td>
+    <td><img src="firmware/preview/38-welcome-aurora.png" width="200" alt="Aurora design with the greeting"></td>
+    <td><img src="firmware/preview/42-welcome-retro.png" width="200" alt="Retro design with a synthwave sun"></td>
+    <td><img src="firmware/preview/40-welcome-orbit.png" width="200" alt="Orbit design with the morning greeting"></td>
+  </tr>
+  <tr>
+    <td><img src="firmware/preview/69-intro-jump.png" width="200" alt="The jump to hyperspace"></td>
+    <td><img src="firmware/preview/65-charging.png" width="200" alt="Charging at 64 %, 142 kW, 326 km"></td>
+    <td><img src="firmware/preview/57-clock-drive.png" width="200" alt="Chrono watch face during the drive"></td>
+    <td><img src="firmware/preview/63-launch-best.png" width="200" alt="New best time 0–100 km/h"></td>
+  </tr>
+</table>
+
+### Your iPhone's notifications
+
+The display can show the iPhone's notifications itself, straight from iOS (Apple Notification Center
+Service), with no extra app in between. Pick in Monav what comes through: *calls only* or *all*, with
+or without the message text.
+
+- **Parked**, a notification shows large, like the iPhone's StandBy: the app's icon, the sender and,
+  if you want, the text.
+- **While driving**, a small pill low on the glass names the app and the sender and keeps your speed
+  in view — unless you ask for them large while driving too.
+- **Calls** always show large, with two buttons: answer on the right, decline on the left.
+- A tap takes a notification off the glass; it stays on the iPhone.
+
+<table>
+  <tr>
+    <td><img src="firmware/preview/52-notice-call.png" width="200" alt="Incoming call with answer and decline"></td>
+    <td><img src="firmware/preview/50-notice.png" width="200" alt="A message, large while parked"></td>
+    <td><img src="firmware/preview/53-notice-drive.png" width="200" alt="A message as a pill while driving"></td>
+  </tr>
+</table>
 
 ## Hardware
 
